@@ -126,6 +126,34 @@ async def test_codex_think_defaults_to_high_effort(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_codex_fast_defaults_to_minimal_effort(monkeypatch):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "codex", raising=False)
+    store = FakeStore()
+
+    reply = await handle_command("fast", "", "user_1", "chat_1", store)
+
+    assert isinstance(reply, str)
+    assert store.effort_calls == [("user_1", "chat_1", "minimal")]
+    assert "minimal" in reply
+
+
+@pytest.mark.asyncio
+async def test_claude_fast_defaults_to_low_effort(monkeypatch):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "claude", raising=False)
+    store = FakeStore()
+
+    reply = await handle_command("fast", "", "user_1", "chat_1", store)
+
+    assert isinstance(reply, str)
+    assert store.effort_calls == [("user_1", "chat_1", "low")]
+    assert "low" in reply
+
+
+def test_fast_is_bot_command_not_forwarded():
+    assert "fast" in commands.BOT_COMMANDS
+
+
+@pytest.mark.asyncio
 async def test_codex_effort_menu_and_aliases_are_codex_safe(monkeypatch):
     monkeypatch.setattr(commands, "AGENT_BACKEND", "codex", raising=False)
 

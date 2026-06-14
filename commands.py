@@ -108,6 +108,7 @@ HELP_TEXT = """\
 `/new` 或 `/clear` — 开始新 session
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换模型（fable / opus / sonnet / haiku 或完整 ID）
+`/fast` — 切到快速模式（等同 `/effort low`）
 `/effort [级别]` — 切换思考深度（low / medium / high / xhigh / max / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
@@ -140,6 +141,7 @@ CODEX_HELP_TEXT = """\
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换 Codex 模型（默认 `gpt-5.5`，也可填完整 ID）
 `/think` — 切到高推理深度（等同 `/effort high`）
+`/fast` — 切到快速模式（等同 `/effort minimal`）
 `/effort [级别]` — 切换推理深度（minimal / low / medium / high / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
@@ -179,7 +181,7 @@ def parse_command(text: str) -> Optional[Tuple[str, str]]:
 
 # Bot 自身处理的命令，其余 /xxx 转发给 Claude
 BOT_COMMANDS = {
-    "help", "h", "new", "clear", "resume", "model", "effort", "thinking", "think", "mode", "status", "cd", "ls",
+    "help", "h", "new", "clear", "resume", "model", "effort", "thinking", "think", "fast", "mode", "status", "cd", "ls",
     "workspace", "ws", "skills", "mcp", "usage", "stop",
 }
 
@@ -792,10 +794,12 @@ async def handle_command(
             return f"✅ 已切换 Claude 模型为 `{model}`\n思考深度：**{default_effort}**"
         return f"✅ 已切换 Claude 模型为 `{model}`"
 
-    elif cmd in ("effort", "thinking", "think"):
+    elif cmd in ("effort", "thinking", "think", "fast"):
         if AGENT_BACKEND == "codex":
             if cmd == "think" and not args:
                 args = "high"
+            if cmd == "fast" and not args:
+                args = "minimal"
             if not args:
                 cur = await store.get_current(user_id, chat_id)
                 return {
@@ -817,6 +821,8 @@ async def handle_command(
 
         if cmd == "think" and not args:
             args = "medium"
+        if cmd == "fast" and not args:
+            args = "low"
         if not args:
             cur = await store.get_current(user_id, chat_id)
             return {

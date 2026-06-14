@@ -243,6 +243,7 @@ _COMMAND_MENU_GROUPS = [
     ("**配置**", [
         {"text": "🔄 切模型",      "value": {"action": "run_cmd", "cmd": "/model"}},
         {"text": "🧠 思考深度",    "value": {"action": "run_cmd", "cmd": "/effort"}},
+        {"text": "⚡ 快速模式",    "value": {"action": "run_cmd", "cmd": "/fast"}},
         {"text": "⚙️ 切模式",      "value": {"action": "run_cmd", "cmd": "/mode"}},
         {"text": "📁 工作空间",    "value": {"action": "run_cmd", "cmd": "/ws"}},
     ]),
