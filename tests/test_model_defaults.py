@@ -182,13 +182,17 @@ async def test_codex_effort_menu_and_aliases_are_codex_safe(monkeypatch):
     reply = await handle_command("effort", "", "user_1", "chat_1", StoreWithCurrent())
     labels = [btn["text"] for btn in reply["buttons"]]
 
-    assert labels == ["🪶 Minimal", "⚡ Low", "⚖️ Medium", "🧠 High", "🤖 Auto"]
-    assert "Max" not in "\n".join(labels)
+    assert labels == ["🪶 Minimal", "⚡ Low", "⚖️ Medium", "🧠 High", "🔥 XHigh", "🤖 Auto"]
 
     store = FakeStore()
     alias_reply = await handle_command("effort", "max", "user_1", "chat_1", store)
-    assert store.effort_calls == [("user_1", "chat_1", "high")]
-    assert "high" in alias_reply
+    assert store.effort_calls == [("user_1", "chat_1", "xhigh")]
+    assert "xhigh" in alias_reply
+
+    store = FakeStore()
+    xhigh_reply = await handle_command("effort", "xhigh", "user_1", "chat_1", store)
+    assert store.effort_calls == [("user_1", "chat_1", "xhigh")]
+    assert "xhigh" in xhigh_reply
 
 
 def test_codex_usage_is_not_claude_oauth(monkeypatch):

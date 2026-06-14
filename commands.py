@@ -47,6 +47,7 @@ CODEX_VALID_EFFORTS = {
     "low": "低：更快，适合简单问答",
     "medium": "中：平衡速度和推理",
     "high": "高：复杂分析/代码任务",
+    "xhigh": "超高：最深推理（模型支持时可用）",
     "auto": "自动：使用 Codex 默认推理深度",
 }
 
@@ -65,13 +66,13 @@ CODEX_EFFORT_ALIASES = {
     "think": "high",
     "hard": "high",
     "thinkhard": "high",
-    "deeper": "high",
-    "ultra": "high",
-    "ultrathink": "high",
+    "deeper": "xhigh",
+    "ultra": "xhigh",
+    "ultrathink": "xhigh",
     "deep": "high",
-    "max": "high",
-    "xhigh": "high",
-    "maxthink": "high",
+    "max": "xhigh",
+    "xhigh": "xhigh",
+    "maxthink": "xhigh",
     "min": "minimal",
     "minimum": "minimal",
 }
@@ -142,7 +143,7 @@ CODEX_HELP_TEXT = """\
 `/model [名称]` — 切换 Codex 模型（默认 `gpt-5.5`，也可填完整 ID）
 `/think` — 切到高推理深度（等同 `/effort high`）
 `/fast [on|off|status]` — Codex 原生 Fast 模式（约 1.5× 速度，GPT-5.5 约 2.5× credit rate）
-`/effort [级别]` — 切换推理深度（minimal / low / medium / high / auto）
+`/effort [级别]` — 切换推理深度（minimal / low / medium / high / xhigh / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
 `/cd [路径]` — 切换工具执行的工作目录
@@ -831,6 +832,7 @@ async def handle_command(
                         {"text": "⚡ Low", "value": {"action": "run_cmd", "cmd": "/effort low", "cid": chat_id}},
                         {"text": "⚖️ Medium", "value": {"action": "run_cmd", "cmd": "/effort medium", "cid": chat_id}},
                         {"text": "🧠 High", "value": {"action": "run_cmd", "cmd": "/effort high", "cid": chat_id}},
+                        {"text": "🔥 XHigh", "value": {"action": "run_cmd", "cmd": "/effort xhigh", "cid": chat_id}},
                         {"text": "🤖 Auto", "value": {"action": "run_cmd", "cmd": "/effort auto", "cid": chat_id}},
                     ],
                 }
