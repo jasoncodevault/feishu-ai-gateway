@@ -275,3 +275,27 @@ def test_run_claude_codex_backend_passes_reasoning_effort(monkeypatch):
     assert used_fallback is False
     assert "-c" in captured["args"]
     assert 'model_reasoning_effort="high"' in captured["args"]
+
+
+def test_run_claude_codex_backend_passes_native_fast_service_tier(monkeypatch):
+    proc = FakeProc([
+        b'{"type":"thread.started","thread_id":"thread_fast"}\n',
+        b'{"type":"item.completed","item":{"type":"agent_message","text":"Fast"}}\n',
+    ])
+    captured = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(claude_runner, "AGENT_BACKEND", "codex", raising=False)
+    monkeypatch.setattr(claude_runner, "CODEX_CLI", "codex", raising=False)
+
+    text, session_id, used_fallback = asyncio.run(run_claude("hi", service_tier="fast"))
+
+    assert text == "Fast"
+    assert session_id == "thread_fast"
+    assert used_fallback is False
+    assert 'service_tier="fast"' in captured["args"]
+    assert "features.fast_mode=true" in captured["args"]

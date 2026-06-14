@@ -9,12 +9,16 @@ class FakeStore:
     def __init__(self):
         self.model_calls = []
         self.effort_calls = []
+        self.service_tier_calls = []
 
     async def set_model(self, user_id, chat_id, model):
         self.model_calls.append((user_id, chat_id, model))
 
     async def set_effort(self, user_id, chat_id, effort):
         self.effort_calls.append((user_id, chat_id, effort))
+
+    async def set_service_tier(self, user_id, chat_id, service_tier):
+        self.service_tier_calls.append((user_id, chat_id, service_tier))
 
 
 @pytest.mark.asyncio
@@ -126,15 +130,29 @@ async def test_codex_think_defaults_to_high_effort(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_codex_fast_defaults_to_minimal_effort(monkeypatch):
+async def test_codex_fast_enables_native_fast_service_tier(monkeypatch):
     monkeypatch.setattr(commands, "AGENT_BACKEND", "codex", raising=False)
     store = FakeStore()
 
     reply = await handle_command("fast", "", "user_1", "chat_1", store)
 
     assert isinstance(reply, str)
-    assert store.effort_calls == [("user_1", "chat_1", "minimal")]
-    assert "minimal" in reply
+    assert store.service_tier_calls == [("user_1", "chat_1", "fast")]
+    assert store.effort_calls == []
+    assert "Fast" in reply
+
+
+@pytest.mark.asyncio
+async def test_codex_fast_off_disables_native_fast_service_tier(monkeypatch):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "codex", raising=False)
+    store = FakeStore()
+
+    reply = await handle_command("fast", "off", "user_1", "chat_1", store)
+
+    assert isinstance(reply, str)
+    assert store.service_tier_calls == [("user_1", "chat_1", "standard")]
+    assert store.effort_calls == []
+    assert "Standard" in reply
 
 
 @pytest.mark.asyncio

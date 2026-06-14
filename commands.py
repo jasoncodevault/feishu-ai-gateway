@@ -141,7 +141,7 @@ CODEX_HELP_TEXT = """\
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换 Codex 模型（默认 `gpt-5.5`，也可填完整 ID）
 `/think` — 切到高推理深度（等同 `/effort high`）
-`/fast` — 切到快速模式（等同 `/effort minimal`）
+`/fast [on|off|status]` — Codex 原生 Fast 模式（约 1.5× 速度，GPT-5.5 约 2.5× credit rate）
 `/effort [级别]` — 切换推理深度（minimal / low / medium / high / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
@@ -794,12 +794,34 @@ async def handle_command(
             return f"✅ 已切换 Claude 模型为 `{model}`\n思考深度：**{default_effort}**"
         return f"✅ 已切换 Claude 模型为 `{model}`"
 
-    elif cmd in ("effort", "thinking", "think", "fast"):
+    elif cmd == "fast":
+        if AGENT_BACKEND == "codex":
+            normalized = args.lower().strip() or "on"
+            if normalized in ("on", "enable", "enabled", "true", "1"):
+                await store.set_service_tier(user_id, chat_id, "fast")
+                return "✅ 已开启 Codex Fast 模式：GPT-5.5 约 1.5× 输出速度，按官方文档约 2.5× credit rate。"
+            if normalized in ("off", "disable", "disabled", "false", "0"):
+                await store.set_service_tier(user_id, chat_id, "standard")
+                return "✅ 已关闭 Codex Fast 模式，恢复 Standard。"
+            if normalized in ("status", "s"):
+                cur = await store.get_current(user_id, chat_id)
+                tier = getattr(cur, "service_tier", "standard") or "standard"
+                return f"📊 当前 Codex 服务档位：**{tier}**"
+            return "❌ 用法：`/fast` 或 `/fast on` 开启，`/fast off` 关闭，`/fast status` 查看。"
+
+        if not args:
+            args = "low"
+        normalized = "".join(args.lower().split())
+        effort = EFFORT_ALIASES.get(normalized, args.lower().strip())
+        if effort not in VALID_EFFORTS:
+            return f"❌ 未知思考深度：`{args}`\n可选：{', '.join(f'`{m}`' for m in VALID_EFFORTS)}"
+        await store.set_effort(user_id, chat_id, effort)
+        return f"✅ 已切换快速思考深度为 **{effort}** — {VALID_EFFORTS[effort]}"
+
+    elif cmd in ("effort", "thinking", "think"):
         if AGENT_BACKEND == "codex":
             if cmd == "think" and not args:
                 args = "high"
-            if cmd == "fast" and not args:
-                args = "minimal"
             if not args:
                 cur = await store.get_current(user_id, chat_id)
                 return {
@@ -821,8 +843,6 @@ async def handle_command(
 
         if cmd == "think" and not args:
             args = "medium"
-        if cmd == "fast" and not args:
-            args = "low"
         if not args:
             cur = await store.get_current(user_id, chat_id)
             return {
@@ -851,11 +871,13 @@ async def handle_command(
         started = cur.get("started_at", "")[:16].replace("T", " ")
         mode = cur.get("permission_mode") or "bypassPermissions"
         effort = cur.get("effort") or "auto"
+        service_tier = cur.get("service_tier") or "standard"
         return (
             f"📊 **当前 Session 状态**\n"
             f"Session ID: `{sid}`\n"
             f"模型: `{model}`\n"
             f"思考深度: `{effort}`\n"
+            f"Codex Fast: `{service_tier}`\n"
             f"权限模式: `{mode}`\n"
             f"工作空间: `{workspace}`\n"
             f"工作目录: `{cwd}`\n"

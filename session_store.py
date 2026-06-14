@@ -278,6 +278,7 @@ class Session:
         cwd: str,
         permission_mode: str,
         effort: str,
+        service_tier: str,
         workspace: str = "",
     ):
         self.session_id = session_id
@@ -285,6 +286,7 @@ class Session:
         self.cwd = cwd
         self.permission_mode = permission_mode
         self.effort = effort
+        self.service_tier = service_tier
         self.workspace = workspace
 
 
@@ -362,6 +364,7 @@ class SessionStore:
             "cwd": DEFAULT_CWD,
             "permission_mode": PERMISSION_MODE,
             "effort": DEFAULT_EFFORT,
+            "service_tier": "standard",
             "started_at": datetime.now().isoformat(),
             "preview": "",
             "workspace": "",
@@ -446,6 +449,7 @@ class SessionStore:
             cwd=cur.get("cwd", DEFAULT_CWD),
             permission_mode=cur.get("permission_mode", PERMISSION_MODE),
             effort=cur.get("effort", DEFAULT_EFFORT),
+            service_tier=cur.get("service_tier", "standard"),
             workspace=cur.get("workspace", ""),
         )
 
@@ -505,6 +509,7 @@ class SessionStore:
             "cwd": cur.get("cwd", DEFAULT_CWD),
             "permission_mode": cur.get("permission_mode", PERMISSION_MODE),
             "effort": cur.get("effort", DEFAULT_EFFORT),
+            "service_tier": cur.get("service_tier", "standard"),
             "started_at": datetime.now().isoformat(),
             "preview": "",
             "workspace": cur.get("workspace", ""),
@@ -532,9 +537,15 @@ class SessionStore:
         await self._save_async()
 
     async def set_effort(self, user_id: str, chat_id: str, effort: str):
-        """Set Claude Code reasoning effort for a specific chat"""
+        """Set Claude/Codex reasoning effort for a specific chat"""
         chat_data = await self._ensure_chat_data(user_id, chat_id)
         chat_data["current"]["effort"] = effort
+        await self._save_async()
+
+    async def set_service_tier(self, user_id: str, chat_id: str, service_tier: str):
+        """Set Codex service tier for a specific chat (standard or fast)."""
+        chat_data = await self._ensure_chat_data(user_id, chat_id)
+        chat_data["current"]["service_tier"] = service_tier
         await self._save_async()
 
     async def resume_session(self, user_id: str, chat_id: str, index_or_id: str) -> tuple[Optional[str], str]:

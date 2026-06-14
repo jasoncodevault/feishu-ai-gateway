@@ -53,6 +53,7 @@ async def run_claude(
     cwd: Optional[str] = None,
     permission_mode: Optional[str] = None,
     effort: Optional[str] = None,
+    service_tier: Optional[str] = None,
     on_text_chunk: Optional[Callable[[str], None]] = None,
     on_tool_use: Optional[Callable[[str, dict], None]] = None,
     on_process_start: Optional[Callable[[asyncio.subprocess.Process], None]] = None,
@@ -73,6 +74,8 @@ async def run_claude(
         cmd += ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
         if effort and effort != "auto":
             cmd += ["-c", f'model_reasoning_effort="{effort}"']
+        if service_tier:
+            cmd += ["-c", f'service_tier="{service_tier}"', "-c", "features.fast_mode=true"]
         if model:
             cmd += ["-m", model]
         if active_session_id:

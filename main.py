@@ -485,6 +485,7 @@ async def _run_and_display(
             cwd=session.cwd,
             permission_mode=session.permission_mode,
             effort=session.effort,
+            service_tier=session.service_tier,
             on_text_chunk=on_text_chunk,
             on_tool_use=on_tool_use,
             on_process_start=lambda proc: _active_runs.attach_process(user_id, proc),
