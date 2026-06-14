@@ -25,6 +25,7 @@ async def test_concurrent_messages_different_groups():
     event_group_a.event.message.message_type = "text"
     event_group_a.event.message.content = '{"text": "message in group A"}'
     event_group_a.event.message.message_id = "msg_a"
+    event_group_a.event.message.mentions = [Mock(key="@bot")]
 
     event_group_b = Mock()
     event_group_b.event.sender.sender_id.open_id = "user123"
@@ -33,6 +34,7 @@ async def test_concurrent_messages_different_groups():
     event_group_b.event.message.message_type = "text"
     event_group_b.event.message.content = '{"text": "message in group B"}'
     event_group_b.event.message.message_id = "msg_b"
+    event_group_b.event.message.mentions = [Mock(key="@bot")]
 
     # 验证两个群组使用不同的锁
     with patch('main._process_message', new_callable=AsyncMock) as mock_process:
@@ -63,6 +65,7 @@ async def test_same_group_messages_serialized():
     event1.event.message.message_type = "text"
     event1.event.message.content = '{"text": "message 1"}'
     event1.event.message.message_id = "msg_1"
+    event1.event.message.mentions = [Mock(key="@bot")]
 
     event2 = Mock()
     event2.event.sender.sender_id.open_id = "user123"
@@ -71,6 +74,7 @@ async def test_same_group_messages_serialized():
     event2.event.message.message_type = "text"
     event2.event.message.content = '{"text": "message 2"}'
     event2.event.message.message_id = "msg_2"
+    event2.event.message.mentions = [Mock(key="@bot")]
 
     with patch('main._process_message', new_callable=AsyncMock) as mock_process:
         # 并发发送两个消息到同一群组

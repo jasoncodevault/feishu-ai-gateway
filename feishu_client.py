@@ -6,6 +6,7 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
 import time
 from typing import Optional
@@ -14,11 +15,35 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1.model import (
     CreateMessageRequest,
     CreateMessageRequestBody,
+    DeleteMessageRequest,
     PatchMessageRequest,
     PatchMessageRequestBody,
     ReplyMessageRequest,
     ReplyMessageRequestBody,
 )
+
+
+_LOCAL_MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _is_remote_or_feishu_image_ref(ref: str) -> bool:
+    ref = ref.strip()
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", ref):
+        return True
+    # Feishu image_key values are opaque IDs, not absolute/local filesystem paths.
+    return bool(re.match(r"^(img|image|avatar|\w+)[A-Za-z0-9_\-:.]{8,}$", ref)) and not ref.startswith(("/", "./", "../", "~"))
+
+
+def _sanitize_card_markdown(content: str) -> str:
+    """Prevent Feishu cards from treating local paths as image_key values."""
+    def repl(match: re.Match) -> str:
+        alt = (match.group(1) or "图片").strip() or "图片"
+        ref = match.group(2).strip()
+        if _is_remote_or_feishu_image_ref(ref):
+            return match.group(0)
+        return f"📎 {alt}：`{ref}`（已作为附件发送或保留为本地路径）"
+
+    return _LOCAL_MARKDOWN_IMAGE_RE.sub(repl, content or "")
 
 
 def _card_json(content: str, loading: bool = False) -> str:
@@ -28,6 +53,7 @@ def _card_json(content: str, loading: bool = False) -> str:
     飞书卡片 markdown 元素有长度限制（约 3000 字符），
     超过限制时自动分段为多个 markdown 元素。
     """
+    content = _sanitize_card_markdown(content or "")
     elements = []
     if loading:
         elements.append({"tag": "markdown", "content": "⏳ 思考中..."})
@@ -192,6 +218,149 @@ class FeishuClient:
 
         await self._retry_with_backoff(_update, max_retries=3)
 
+    # ── 媒体上传/发送 ─────────────────────────────────────────
+
+    async def upload_image(self, path: str) -> str:
+        """Upload a local image file and return Feishu image_key."""
+        from lark_oapi.api.im.v1.model import CreateImageRequest, CreateImageRequestBody
+
+        async def _upload():
+            with open(path, "rb") as f:
+                req = (
+                    CreateImageRequest.builder()
+                    .request_body(
+                        CreateImageRequestBody.builder()
+                        .image_type("message")
+                        .image(f)
+                        .build()
+                    )
+                    .build()
+                )
+                resp = await self.client.im.v1.image.acreate(req)
+            if not resp.success():
+                raise RuntimeError(f"上传图片失败: {resp.code} {resp.msg}")
+            return resp.data.image_key
+
+        return await self._retry_with_backoff(_upload, max_retries=2)
+
+    @staticmethod
+    def _file_type_for_path(path: str) -> str:
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        if ext in ("ppt", "pptx"):
+            return "ppt"
+        if ext in ("doc", "docx"):
+            return "doc"
+        if ext in ("xls", "xlsx", "csv"):
+            return "xls"
+        if ext == "pdf":
+            return "pdf"
+        if ext in ("mp4", "mov", "m4v"):
+            return "mp4"
+        if ext in ("opus", "ogg"):
+            return "opus"
+        return "stream"
+
+    async def upload_file(self, path: str, file_name: str | None = None) -> str:
+        """Upload a local file and return Feishu file_key."""
+        from lark_oapi.api.im.v1.model import CreateFileRequest, CreateFileRequestBody
+
+        file_name = file_name or os.path.basename(path)
+        file_type = self._file_type_for_path(file_name or path)
+
+        async def _upload():
+            with open(path, "rb") as f:
+                req = (
+                    CreateFileRequest.builder()
+                    .request_body(
+                        CreateFileRequestBody.builder()
+                        .file_type(file_type)
+                        .file_name(file_name)
+                        .file(f)
+                        .build()
+                    )
+                    .build()
+                )
+                resp = await self.client.im.v1.file.acreate(req)
+            if not resp.success():
+                raise RuntimeError(f"上传文件失败: {resp.code} {resp.msg}")
+            return resp.data.file_key
+
+        return await self._retry_with_backoff(_upload, max_retries=2)
+
+    async def send_image_to_user(self, open_id: str, path: str) -> str:
+        image_key = await self.upload_image(path)
+        req = (
+            CreateMessageRequest.builder()
+            .receive_id_type("open_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(open_id)
+                .msg_type("image")
+                .content(json.dumps({"image_key": image_key}))
+                .build()
+            )
+            .build()
+        )
+        resp = await self.client.im.v1.message.acreate(req)
+        if not resp.success():
+            raise RuntimeError(f"发送图片失败: {resp.code} {resp.msg}")
+        return resp.data.message_id
+
+    async def reply_image(self, message_id: str, path: str) -> str:
+        image_key = await self.upload_image(path)
+        req = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("image")
+                .content(json.dumps({"image_key": image_key}))
+                .build()
+            )
+            .build()
+        )
+        resp = await self.client.im.v1.message.areply(req)
+        if not resp.success():
+            raise RuntimeError(f"回复图片失败: {resp.code} {resp.msg}")
+        return resp.data.message_id
+
+    async def send_file_to_user(self, open_id: str, path: str, file_name: str | None = None) -> str:
+        file_key = await self.upload_file(path, file_name=file_name)
+        req = (
+            CreateMessageRequest.builder()
+            .receive_id_type("open_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(open_id)
+                .msg_type("file")
+                .content(json.dumps({"file_key": file_key}))
+                .build()
+            )
+            .build()
+        )
+        resp = await self.client.im.v1.message.acreate(req)
+        if not resp.success():
+            raise RuntimeError(f"发送文件失败: {resp.code} {resp.msg}")
+        return resp.data.message_id
+
+    async def reply_file(self, message_id: str, path: str, file_name: str | None = None) -> str:
+        file_key = await self.upload_file(path, file_name=file_name)
+        req = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("file")
+                .content(json.dumps({"file_key": file_key}))
+                .build()
+            )
+            .build()
+        )
+        resp = await self.client.im.v1.message.areply(req)
+        if not resp.success():
+            raise RuntimeError(f"回复文件失败: {resp.code} {resp.msg}")
+        return resp.data.message_id
+
     async def download_image(self, message_id: str, image_key: str) -> str:
         """下载飞书图片到临时文件，返回本地路径（不阻塞事件循环）"""
         return await asyncio.to_thread(
@@ -228,6 +397,41 @@ class FeishuClient:
             with open(tmp_path, "wb") as f:
                 f.write(r.read())
 
+        return tmp_path
+
+    async def download_file(self, message_id: str, file_key: str, file_name: str | None = None) -> str:
+        """下载飞书文件到临时文件，返回本地路径（不阻塞事件循环）"""
+        return await asyncio.to_thread(self._download_file_sync, message_id, file_key, file_name)
+
+    def _download_file_sync(self, message_id: str, file_key: str, file_name: str | None = None) -> str:
+        """同步下载文件逻辑，在线程池中执行。"""
+        import ssl
+        import urllib.request
+        import uuid
+
+        ctx = ssl.create_default_context()
+        token_body = json.dumps({"app_id": self._app_id, "app_secret": self._app_secret}).encode()
+        token_req = urllib.request.Request(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            data=token_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(token_req, context=ctx, timeout=10) as r:
+            token = json.loads(r.read())["tenant_access_token"]
+
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=file"
+        file_req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        safe_name = os.path.basename(file_name or f"feishu-file-{uuid.uuid4().hex[:8]}")
+        if not safe_name:
+            safe_name = f"feishu-file-{uuid.uuid4().hex[:8]}"
+        tmp_path = os.path.join(tempfile.gettempdir(), safe_name)
+        if os.path.exists(tmp_path):
+            stem, ext = os.path.splitext(safe_name)
+            tmp_path = os.path.join(tempfile.gettempdir(), f"{stem}-{uuid.uuid4().hex[:6]}{ext}")
+        with urllib.request.urlopen(file_req, context=ctx, timeout=60) as r:
+            with open(tmp_path, "wb") as f:
+                f.write(r.read())
         return tmp_path
 
     async def update_card_with_buttons(self, message_id: str, content: str, buttons: list[dict],
@@ -315,6 +519,13 @@ class FeishuClient:
             return resp.data.message_id
 
         return await self._retry_with_backoff(_reply, max_retries=2)
+
+    async def recall_message(self, message_id: str):
+        """撤回机器人自己发送的消息。"""
+        req = DeleteMessageRequest.builder().message_id(message_id).build()
+        resp = await self.client.im.v1.message.adelete(req)
+        if not resp.success():
+            raise RuntimeError(f"撤回消息失败: {resp.code} {resp.msg}")
 
     async def send_text_to_user(self, open_id: str, text: str) -> str:
         """发送纯文本消息"""

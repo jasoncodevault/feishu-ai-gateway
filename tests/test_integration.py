@@ -492,7 +492,8 @@ async def test_group_sessions_isolated_end_to_end():
     session_a = await real_store.get_current("user_001", "group_a")
     session_b = await real_store.get_current("user_001", "group_b")
 
-    assert session_a.model == "claude-opus-4-6"
+    assert session_a.model == "claude-opus-4-8"
+    assert session_a.effort == "high"
     assert session_b.model == "claude-haiku-4-5-20251001"
 
 

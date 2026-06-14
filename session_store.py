@@ -8,7 +8,7 @@ import urllib.error
 from datetime import datetime
 from typing import Optional
 
-from bot_config import SESSIONS_DIR, DEFAULT_MODEL, DEFAULT_CWD, PERMISSION_MODE
+from bot_config import SESSIONS_DIR, DEFAULT_MODEL, DEFAULT_CWD, PERMISSION_MODE, DEFAULT_EFFORT
 
 CLAUDE_PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
 
@@ -277,12 +277,14 @@ class Session:
         model: str,
         cwd: str,
         permission_mode: str,
+        effort: str,
         workspace: str = "",
     ):
         self.session_id = session_id
         self.model = model
         self.cwd = cwd
         self.permission_mode = permission_mode
+        self.effort = effort
         self.workspace = workspace
 
 
@@ -359,6 +361,7 @@ class SessionStore:
             "model": DEFAULT_MODEL,
             "cwd": DEFAULT_CWD,
             "permission_mode": PERMISSION_MODE,
+            "effort": DEFAULT_EFFORT,
             "started_at": datetime.now().isoformat(),
             "preview": "",
             "workspace": "",
@@ -442,6 +445,7 @@ class SessionStore:
             model=cur.get("model", DEFAULT_MODEL),
             cwd=cur.get("cwd", DEFAULT_CWD),
             permission_mode=cur.get("permission_mode", PERMISSION_MODE),
+            effort=cur.get("effort", DEFAULT_EFFORT),
             workspace=cur.get("workspace", ""),
         )
 
@@ -500,6 +504,7 @@ class SessionStore:
             "model": cur.get("model", DEFAULT_MODEL),
             "cwd": cur.get("cwd", DEFAULT_CWD),
             "permission_mode": cur.get("permission_mode", PERMISSION_MODE),
+            "effort": cur.get("effort", DEFAULT_EFFORT),
             "started_at": datetime.now().isoformat(),
             "preview": "",
             "workspace": cur.get("workspace", ""),
@@ -524,6 +529,12 @@ class SessionStore:
         """Set permission mode for a specific chat"""
         chat_data = await self._ensure_chat_data(user_id, chat_id)
         chat_data["current"]["permission_mode"] = mode
+        await self._save_async()
+
+    async def set_effort(self, user_id: str, chat_id: str, effort: str):
+        """Set Claude Code reasoning effort for a specific chat"""
+        chat_data = await self._ensure_chat_data(user_id, chat_id)
+        chat_data["current"]["effort"] = effort
         await self._save_async()
 
     async def resume_session(self, user_id: str, chat_id: str, index_or_id: str) -> tuple[Optional[str], str]:

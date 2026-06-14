@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Run Claude Code through a per-process SOCKS proxy via proxychains4.
+
+Reads CLAUDE_PROXY / CLAUDE_ALL_PROXY in standard URI form:
+  http://user:pass@host:port
+  socks5://user:pass@host:port
+  socks5h://user:pass@host:port
+  socks5://host:port
+"""
+import os
+import sys
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse, unquote
+
+proxy = os.environ.get("CLAUDE_PROXY") or os.environ.get("CLAUDE_ALL_PROXY")
+if not proxy:
+    os.execvp("claude", ["claude", *sys.argv[1:]])
+
+u = urlparse(proxy)
+scheme = (u.scheme or "").lower()
+if scheme not in {"http", "socks5", "socks5h"}:
+    print(f"claude-proxied: unsupported proxy scheme {scheme!r}; expected http/socks5/socks5h", file=sys.stderr)
+    sys.exit(2)
+if not u.hostname or not u.port:
+    print("claude-proxied: proxy must include host and port", file=sys.stderr)
+    sys.exit(2)
+
+if scheme == "http":
+    # Claude Code/Node can use standard HTTP(S)_PROXY env directly. This is
+    # faster and less fragile than LD_PRELOAD proxychains for HTTP CONNECT.
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+        os.environ[key] = proxy
+    # Keep local/private endpoints (MCP servers, callback services, Docker gateways)
+    # off the external proxy path. Include explicit Docker gateway IPs because
+    # some Node HTTP stacks ignore CIDR entries in NO_PROXY.
+    no_proxy_hosts = [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "172.19.0.1",
+        "172.20.0.1",
+        "192.168.0.0/16",
+    ]
+    existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    merged = ",".join([p for p in [existing, *no_proxy_hosts] if p])
+    os.environ["NO_PROXY"] = merged
+    os.environ["no_proxy"] = merged
+    os.execvp("claude", ["claude", *sys.argv[1:]])
+
+host = u.hostname
+port = str(u.port)
+user = unquote(u.username or "")
+password = unquote(u.password or "")
+parts = ["socks5", host, port]
+if user:
+    parts.extend([user, password])
+
+conf = """
+strict_chain
+proxy_dns
+remote_dns_subnet 224
+tcp_read_time_out 15000
+tcp_connect_time_out 8000
+# Bypass private/local networks so MCP servers and local services remain reachable
+# from Claude Code even when external Anthropic traffic is proxied.
+localnet 127.0.0.0/255.0.0.0
+localnet 10.0.0.0/255.0.0.0
+localnet 172.16.0.0/255.240.0.0
+localnet 192.168.0.0/255.255.0.0
+[ProxyList]
+{line}
+""".format(line=" ".join(parts))
+
+fd, path = tempfile.mkstemp(prefix="proxychains-claude-", suffix=".conf")
+os.close(fd)
+Path(path).write_text(conf)
+os.chmod(path, 0o600)
+
+# Avoid accidental double-proxy behavior inside Claude/Node; proxychains owns routing.
+for key in ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy"):
+    os.environ.pop(key, None)
+
+argv = ["proxychains4", "-q", "-f", path, "claude", *sys.argv[1:]]
+os.execvp("proxychains4", argv)

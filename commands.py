@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 from typing import Optional, Tuple
 
-from bot_config import CLAUDE_CLI, DEFAULT_CWD
+from bot_config import AGENT_BACKEND, CLAUDE_CLI, CODEX_CLI, DEFAULT_CWD, DEFAULT_MODEL
 from session_store import SessionStore, scan_cli_sessions, generate_summary, _get_api_token, _write_custom_title
 
 PLUGINS_DIR = os.path.expanduser("~/.claude/plugins")
@@ -33,10 +33,70 @@ MODE_ALIASES = {
     "auto": "bypassPermissions",
 }
 
-MODEL_ALIASES = {
-    "opus": "claude-opus-4-6",
+VALID_EFFORTS = {
+    "low": "低：更快，适合简单问答",
+    "medium": "中：平衡速度和推理",
+    "high": "高：复杂分析/代码任务",
+    "xhigh": "超高：更深推理",
+    "max": "最高：最深推理，最慢也最贵",
+    "auto": "自动：由 Claude Code 判断",
+}
+
+CODEX_VALID_EFFORTS = {
+    "minimal": "最小：最快，适合简单确认",
+    "low": "低：更快，适合简单问答",
+    "medium": "中：平衡速度和推理",
+    "high": "高：复杂分析/代码任务",
+    "auto": "自动：使用 Codex 默认推理深度",
+}
+
+EFFORT_ALIASES = {
+    "think": "medium",
+    "hard": "high",
+    "thinkhard": "high",
+    "deeper": "xhigh",
+    "ultra": "max",
+    "ultrathink": "max",
+    "deep": "high",
+    "maxthink": "max",
+}
+
+CODEX_EFFORT_ALIASES = {
+    "think": "high",
+    "hard": "high",
+    "thinkhard": "high",
+    "deeper": "high",
+    "ultra": "high",
+    "ultrathink": "high",
+    "deep": "high",
+    "max": "high",
+    "xhigh": "high",
+    "maxthink": "high",
+    "min": "minimal",
+    "minimum": "minimal",
+}
+
+CLAUDE_MODEL_ALIASES = {
+    "fable": "claude-fable-5",
+    "opus": "claude-opus-4-8",
     "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5-20251001",
+}
+
+CODEX_MODEL_ALIASES = {
+    "codex": "gpt-5.5",
+    "default": DEFAULT_MODEL,
+    "gpt5.5": "gpt-5.5",
+    "gpt-5.5": "gpt-5.5",
+}
+
+MODEL_ALIASES = CLAUDE_MODEL_ALIASES
+
+MODEL_DEFAULT_EFFORTS = {
+    "fable": "high",
+    "opus": "high",
+    "claude-fable-5": "high",
+    "claude-opus-4-8": "high",
 }
 
 HELP_TEXT = """\
@@ -47,7 +107,8 @@ HELP_TEXT = """\
 `/stop` — 停止当前正在运行的任务
 `/new` 或 `/clear` — 开始新 session
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
-`/model [名称]` — 切换模型（opus / sonnet / haiku 或完整 ID）
+`/model [名称]` — 切换模型（fable / opus / sonnet / haiku 或完整 ID）
+`/effort [级别]` — 切换思考深度（low / medium / high / xhigh / max / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
 `/cd [路径]` — 切换工具执行的工作目录
@@ -69,6 +130,38 @@ HELP_TEXT = """\
 **发送任意普通消息即可与 Claude 对话。**\
 """
 
+CODEX_HELP_TEXT = """\
+📖 **谷雨 / Codex 可用命令**
+
+**Bot 管理：**
+`/help` — 显示此帮助
+`/stop` — 停止当前正在运行的任务
+`/new` 或 `/clear` — 开始新 session
+`/resume` — 查看历史 sessions / `/resume [序号]` 恢复
+`/model [名称]` — 切换 Codex 模型（默认 `gpt-5.5`，也可填完整 ID）
+`/think` — 切到高推理深度（等同 `/effort high`）
+`/effort [级别]` — 切换推理深度（minimal / low / medium / high / auto）
+`/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
+`/status` — 显示当前 session 信息
+`/cd [路径]` — 切换工具执行的工作目录
+`/ls [路径]` — 查看当前工作目录下的文件/目录
+`/workspace` 或 `/ws` — 保存/切换群组工作空间
+
+**查看能力：**
+`/skills` — 列出已安装的 Codex Skills（如有）
+`/mcp` — 列出已配置的 Codex MCP Servers
+`/usage` — 说明 Codex 用量查询状态
+
+**Codex Skills / MCP：**
+其他 `/xxx` 会自动转发给 Codex 处理；已配置 MCP servers 可直接对话调用。
+
+**发送任意普通消息即可与 Codex 对话。**\
+"""
+
+
+def _help_text() -> str:
+    return CODEX_HELP_TEXT if AGENT_BACKEND == "codex" else HELP_TEXT
+
 
 def parse_command(text: str) -> Optional[Tuple[str, str]]:
     """
@@ -86,7 +179,7 @@ def parse_command(text: str) -> Optional[Tuple[str, str]]:
 
 # Bot 自身处理的命令，其余 /xxx 转发给 Claude
 BOT_COMMANDS = {
-    "help", "h", "new", "clear", "resume", "model", "mode", "status", "cd", "ls",
+    "help", "h", "new", "clear", "resume", "model", "effort", "thinking", "think", "mode", "status", "cd", "ls",
     "workspace", "ws", "skills", "mcp", "usage", "stop",
 }
 
@@ -213,32 +306,46 @@ async def _format_session_list(user_id: str, chat_id: str, store: SessionStore):
 
 
 def _list_skills(chat_id: str = ""):
-    """扫描 ~/.claude/plugins + ~/.claude/skills 目录，返回 dict(text, buttons) 或 str"""
+    """扫描当前 backend 的 Skills 目录，返回 dict(text, buttons) 或 str"""
     skills = []
-    # 扫描 plugins (旧格式)
-    if os.path.isdir(PLUGINS_DIR):
-        for root, dirs, files in os.walk(PLUGINS_DIR):
-            if os.path.basename(root) != "commands":
-                continue
-            for fname in files:
-                if not fname.endswith(".md"):
+
+    if AGENT_BACKEND == "codex":
+        skills_dir = os.path.expanduser("~/.codex/skills")
+        if os.path.isdir(skills_dir):
+            for root, dirs, files in os.walk(skills_dir):
+                if "SKILL.md" not in files:
                     continue
-                name = fname[:-3]
-                fpath = os.path.join(root, fname)
+                name = os.path.basename(root)
+                fpath = os.path.join(root, "SKILL.md")
                 desc = _read_skill_desc(fpath)
                 skills.append((name, desc))
+        if not skills:
+            return "暂无已安装的 Codex Skills。"
+    else:
+        # 扫描 plugins (旧格式)
+        if os.path.isdir(PLUGINS_DIR):
+            for root, dirs, files in os.walk(PLUGINS_DIR):
+                if os.path.basename(root) != "commands":
+                    continue
+                for fname in files:
+                    if not fname.endswith(".md"):
+                        continue
+                    name = fname[:-3]
+                    fpath = os.path.join(root, fname)
+                    desc = _read_skill_desc(fpath)
+                    skills.append((name, desc))
 
-    # 扫描 skills (新格式)
-    skills_dir = os.path.expanduser("~/.claude/skills")
-    if os.path.isdir(skills_dir):
-        for entry in os.listdir(skills_dir):
-            skill_md = os.path.join(skills_dir, entry, "SKILL.md")
-            if os.path.isfile(skill_md):
-                desc = _read_skill_desc(skill_md)
-                skills.append((entry, desc))
+        # 扫描 skills (新格式)
+        skills_dir = os.path.expanduser("~/.claude/skills")
+        if os.path.isdir(skills_dir):
+            for entry in os.listdir(skills_dir):
+                skill_md = os.path.join(skills_dir, entry, "SKILL.md")
+                if os.path.isfile(skill_md):
+                    desc = _read_skill_desc(skill_md)
+                    skills.append((entry, desc))
 
-    if not skills:
-        return "暂无已安装的 skills。"
+        if not skills:
+            return "暂无已安装的 skills。"
 
     skills.sort(key=lambda x: x[0])
     # 去重
@@ -253,8 +360,9 @@ def _list_skills(chat_id: str = ""):
         {"text": f"/{name}", "value": {"action": "reply", "reply": f"/{name}", "cid": chat_id}}
         for name, desc in unique[:15]
     ]
+    title_prefix = "Codex Skills" if AGENT_BACKEND == "codex" else "Skills"
     return {
-        "text": f"🛠 **可用 Skills** ({len(unique)} 个)",
+        "text": f"🛠 **可用 {title_prefix}** ({len(unique)} 个)",
         "buttons": buttons,
     }
 
@@ -278,26 +386,59 @@ def _read_skill_desc(fpath: str) -> str:
     return ""
 
 
+def _load_claude_oauth_credentials() -> dict:
+    """读取 Claude Code OAuth 凭证。Linux/Docker 读文件，macOS 兼容 Keychain。"""
+    candidate_paths = [
+        os.getenv("CLAUDE_CREDENTIALS_PATH", ""),
+        "~/.claude/.credentials.json",
+    ]
+    for raw_path in candidate_paths:
+        if not raw_path:
+            continue
+        path = os.path.expanduser(raw_path)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            creds = json.load(f)
+        oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
+        if isinstance(oauth, dict) and oauth.get("accessToken"):
+            return oauth
+
+    if sys.platform == "darwin":
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            creds = json.loads(result.stdout.strip())
+            oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
+            if isinstance(oauth, dict) and oauth.get("accessToken"):
+                return oauth
+
+    raise FileNotFoundError("未找到 Claude Code OAuth 凭证（尝试 ~/.claude/.credentials.json 和 macOS Keychain）")
+
+
 def _get_usage() -> str:
     """
     发一个轻量 API 请求，从响应 headers 获取 Claude Max 订阅用量百分比和重置时间。
+    支持 Linux/Docker 的 ~/.claude/.credentials.json，也兼容 macOS Keychain。
     """
-    if sys.platform != "darwin":
-        return "❌ /usage 目前只支持 macOS"
+    if AGENT_BACKEND == "codex":
+        return (
+            "📊 **Codex 用量**\n\n"
+            "当前 Codex CLI 没有暴露可稳定脚本读取的订阅/额度接口；"
+            "此命令仅确认当前 backend 是 Codex。"
+        )
 
     import urllib.request
     import urllib.error
     import ssl
 
     try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-        creds = json.loads(result.stdout.strip())
-        token = creds["claudeAiOauth"]["accessToken"]
+        oauth = _load_claude_oauth_credentials()
+        token = oauth["accessToken"]
     except Exception as e:
-        return f"❌ 读取凭证失败：{e}"
+        return f"❌ 读取 Claude Code OAuth 凭证失败：{e}"
 
     body = json.dumps({
         "model": "claude-haiku-4-5-20251001",
@@ -342,8 +483,12 @@ def _get_usage() -> str:
         if ts is None:
             return "未知"
         try:
-            dt = datetime.fromtimestamp(int(ts))
-            now = datetime.now()
+            from zoneinfo import ZoneInfo
+
+            tz_name = os.getenv("USAGE_TIMEZONE", "Asia/Shanghai")
+            tz = ZoneInfo(tz_name)
+            dt = datetime.fromtimestamp(int(ts), tz)
+            now = datetime.now(tz)
             diff = dt - now
             hours = int(diff.total_seconds() // 3600)
             minutes = int((diff.total_seconds() % 3600) // 60)
@@ -374,10 +519,12 @@ def _get_usage() -> str:
 
 
 def _list_mcp() -> str:
-    """调用 claude mcp list 获取已配置的 MCP servers"""
+    """调用当前 backend CLI 获取已配置的 MCP servers"""
+    backend_name = "Codex" if AGENT_BACKEND == "codex" else "Claude"
+    cli = CODEX_CLI if AGENT_BACKEND == "codex" else CLAUDE_CLI
     try:
         result = subprocess.run(
-            [CLAUDE_CLI, "mcp", "list"],
+            [cli, "mcp", "list"],
             capture_output=True, text=True, timeout=10,
         )
         output = result.stdout.strip()
@@ -385,9 +532,9 @@ def _list_mcp() -> str:
         return f"❌ 获取 MCP 列表失败：{e}"
 
     if not output:
-        return "暂无已配置的 MCP servers。\n\n用 `claude mcp add` 在终端添加。"
+        return f"暂无已配置的 MCP servers。\n\n用 `{cli} mcp add` 在终端添加。"
 
-    return f"🔌 **已配置的 MCP Servers**\n\n{output}"
+    return f"🔌 **{backend_name} 已配置的 MCP Servers**\n\n{output}"
 
 
 async def _list_directory(user_id: str, chat_id: str, store: SessionStore, args: str) -> str:
@@ -556,7 +703,7 @@ async def handle_command(
         cmd = "workspace"
 
     if cmd in ("help", "h"):
-        return HELP_TEXT
+        return _help_text()
 
     elif cmd in ("new", "clear"):
         # /new [mode] — 开新 session，可选指定模式
@@ -611,19 +758,83 @@ async def handle_command(
         return reply
 
     elif cmd == "model":
+        if AGENT_BACKEND == "codex":
+            if not args:
+                cur = await store.get_current(user_id, chat_id)
+                return {
+                    "text": f"当前 Codex 模型：**{cur.model}**",
+                    "buttons": [
+                        {"text": "🤖 GPT-5.5", "value": {"action": "run_cmd", "cmd": "/model gpt-5.5", "cid": chat_id}},
+                    ],
+                }
+            requested_model = args.lower().strip()
+            model = CODEX_MODEL_ALIASES.get(requested_model, args)
+            await store.set_model(user_id, chat_id, model)
+            return f"✅ 已切换 Codex 模型为 `{model}`"
+
         if not args:
             cur = await store.get_current(user_id, chat_id)
             return {
-                "text": f"当前模型：**{cur.model}**",
+                "text": f"当前 Claude 模型：**{cur.model}**",
                 "buttons": [
-                    {"text": "🧠 Opus", "value": {"action": "run_cmd", "cmd": "/model opus", "cid": chat_id}},
-                    {"text": "⚡ Sonnet", "value": {"action": "run_cmd", "cmd": "/model sonnet", "cid": chat_id}},
-                    {"text": "🐇 Haiku", "value": {"action": "run_cmd", "cmd": "/model haiku", "cid": chat_id}},
+                    {"text": "📚 Fable 5", "value": {"action": "run_cmd", "cmd": "/model fable", "cid": chat_id}},
+                    {"text": "🧠 Opus 4.8", "value": {"action": "run_cmd", "cmd": "/model opus", "cid": chat_id}},
+                    {"text": "⚡ Sonnet 4.6", "value": {"action": "run_cmd", "cmd": "/model sonnet", "cid": chat_id}},
+                    {"text": "🐇 Haiku 4.5", "value": {"action": "run_cmd", "cmd": "/model haiku", "cid": chat_id}},
                 ],
             }
-        model = MODEL_ALIASES.get(args.lower(), args)
+        requested_model = args.lower().strip()
+        model = CLAUDE_MODEL_ALIASES.get(requested_model, args)
+        default_effort = MODEL_DEFAULT_EFFORTS.get(requested_model) or MODEL_DEFAULT_EFFORTS.get(model)
         await store.set_model(user_id, chat_id, model)
-        return f"✅ 已切换模型为 `{model}`"
+        if default_effort:
+            await store.set_effort(user_id, chat_id, default_effort)
+            return f"✅ 已切换 Claude 模型为 `{model}`\n思考深度：**{default_effort}**"
+        return f"✅ 已切换 Claude 模型为 `{model}`"
+
+    elif cmd in ("effort", "thinking", "think"):
+        if AGENT_BACKEND == "codex":
+            if cmd == "think" and not args:
+                args = "high"
+            if not args:
+                cur = await store.get_current(user_id, chat_id)
+                return {
+                    "text": f"当前 Codex 推理深度：**{cur.effort}**\n{CODEX_VALID_EFFORTS.get(cur.effort, '')}",
+                    "buttons": [
+                        {"text": "🪶 Minimal", "value": {"action": "run_cmd", "cmd": "/effort minimal", "cid": chat_id}},
+                        {"text": "⚡ Low", "value": {"action": "run_cmd", "cmd": "/effort low", "cid": chat_id}},
+                        {"text": "⚖️ Medium", "value": {"action": "run_cmd", "cmd": "/effort medium", "cid": chat_id}},
+                        {"text": "🧠 High", "value": {"action": "run_cmd", "cmd": "/effort high", "cid": chat_id}},
+                        {"text": "🤖 Auto", "value": {"action": "run_cmd", "cmd": "/effort auto", "cid": chat_id}},
+                    ],
+                }
+            normalized = "".join(args.lower().split())
+            effort = CODEX_EFFORT_ALIASES.get(normalized, args.lower().strip())
+            if effort not in CODEX_VALID_EFFORTS:
+                return f"❌ 未知 Codex 推理深度：`{args}`\n可选：{', '.join(f'`{m}`' for m in CODEX_VALID_EFFORTS)}"
+            await store.set_effort(user_id, chat_id, effort)
+            return f"✅ 已切换 Codex 推理深度为 **{effort}** — {CODEX_VALID_EFFORTS[effort]}"
+
+        if cmd == "think" and not args:
+            args = "medium"
+        if not args:
+            cur = await store.get_current(user_id, chat_id)
+            return {
+                "text": f"当前思考深度：**{cur.effort}**\n{VALID_EFFORTS.get(cur.effort, '')}",
+                "buttons": [
+                    {"text": "⚡ Low", "value": {"action": "run_cmd", "cmd": "/effort low", "cid": chat_id}},
+                    {"text": "⚖️ Medium", "value": {"action": "run_cmd", "cmd": "/effort medium", "cid": chat_id}},
+                    {"text": "🧠 High", "value": {"action": "run_cmd", "cmd": "/effort high", "cid": chat_id}},
+                    {"text": "🔥 Max", "value": {"action": "run_cmd", "cmd": "/effort max", "cid": chat_id}},
+                    {"text": "🤖 Auto", "value": {"action": "run_cmd", "cmd": "/effort auto", "cid": chat_id}},
+                ],
+            }
+        normalized = "".join(args.lower().split())
+        effort = EFFORT_ALIASES.get(normalized, args.lower().strip())
+        if effort not in VALID_EFFORTS:
+            return f"❌ 未知思考深度：`{args}`\n可选：{', '.join(f'`{m}`' for m in VALID_EFFORTS)}"
+        await store.set_effort(user_id, chat_id, effort)
+        return f"✅ 已切换思考深度为 **{effort}** — {VALID_EFFORTS[effort]}"
 
     elif cmd == "status":
         cur = await store.get_current_raw(user_id, chat_id)
@@ -633,10 +844,12 @@ async def handle_command(
         workspace = cur.get("workspace") or "（未绑定）"
         started = cur.get("started_at", "")[:16].replace("T", " ")
         mode = cur.get("permission_mode") or "bypassPermissions"
+        effort = cur.get("effort") or "auto"
         return (
             f"📊 **当前 Session 状态**\n"
             f"Session ID: `{sid}`\n"
             f"模型: `{model}`\n"
+            f"思考深度: `{effort}`\n"
             f"权限模式: `{mode}`\n"
             f"工作空间: `{workspace}`\n"
             f"工作目录: `{cwd}`\n"

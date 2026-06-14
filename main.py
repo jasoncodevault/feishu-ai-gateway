@@ -78,6 +78,79 @@ _active_runs = ActiveRunRegistry()
 # per-chat 消息队列锁，保证同一群组的消息串行处理，允许不同群组并发处理
 _chat_locks: dict[str, asyncio.Lock] = {}
 _MAX_CHAT_LOCKS = 200  # 防止无界增长
+FINAL_REPOST_MIN_DURATION_SEC = 30.0
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_MARKDOWN_MEDIA_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_MEDIA_TOKEN_RE = re.compile(r"MEDIA:(/[^\s)]+)")
+
+
+def _clean_local_path_ref(ref: str) -> str:
+    ref = ref.strip().strip('"\'')
+    if ref.startswith("file://"):
+        ref = ref[7:]
+    ref = os.path.expanduser(ref)
+    return ref
+
+
+def _iter_local_media_refs(text: str) -> list[str]:
+    """Return existing local image/file refs mentioned by agent output."""
+    refs: list[str] = []
+    for match in _MARKDOWN_MEDIA_RE.finditer(text or ""):
+        refs.append(_clean_local_path_ref(match.group(2)))
+    for match in _MEDIA_TOKEN_RE.finditer(text or ""):
+        refs.append(_clean_local_path_ref(match.group(1)))
+
+    seen = set()
+    existing: list[str] = []
+    for ref in refs:
+        if ref in seen:
+            continue
+        seen.add(ref)
+        if os.path.isfile(ref):
+            existing.append(ref)
+    return existing
+
+
+async def _send_local_media_refs(
+    user_id: str,
+    *,
+    is_group: bool,
+    notify_msg_id: str,
+    text: str,
+) -> None:
+    """Upload and send local media files referenced in the final answer."""
+    refs = _iter_local_media_refs(text)
+    if not refs:
+        return
+    for path in refs:
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in _IMAGE_EXTS:
+                if is_group and notify_msg_id:
+                    await feishu.reply_image(notify_msg_id, path)
+                else:
+                    await feishu.send_image_to_user(user_id, path)
+            else:
+                if is_group and notify_msg_id:
+                    await feishu.reply_file(notify_msg_id, path)
+                else:
+                    await feishu.send_file_to_user(user_id, path)
+            print(f"[media] sent local file: {path}", flush=True)
+        except Exception as exc:
+            print(f"[warn] 发送本地媒体失败 path={path}: {exc}", flush=True)
+
+
+def _iter_mentions(msg) -> list:
+    """Return Feishu mention objects, tolerating SDK/test objects without a real list."""
+    mentions = getattr(msg, "mentions", None)
+    if mentions is None:
+        return []
+    if isinstance(mentions, (list, tuple)):
+        return list(mentions)
+    try:
+        return list(mentions)
+    except TypeError:
+        return []
 
 
 # ── /stop 命令处理 ───────────────────────────────────────────
@@ -112,6 +185,52 @@ async def _handle_stop_command(sender_open_id: str) -> str:
     return "已发送停止请求"
 
 
+async def _send_completion_notice(
+    user_id: str,
+    *,
+    is_group: bool,
+    notify_msg_id: str,
+    text: str = "✅ 已完成",
+) -> None:
+    """Send the shortest possible trailing status notice."""
+    try:
+        if is_group and notify_msg_id:
+            await feishu.reply_text(notify_msg_id, text)
+        else:
+            await feishu.send_text_to_user(user_id, text)
+    except Exception as exc:
+        print(f"[warn] completion notice failed: {exc}", flush=True)
+
+
+def _should_final_repost(duration_sec: float, *, has_options: bool) -> bool:
+    return (not has_options) and duration_sec > FINAL_REPOST_MIN_DURATION_SEC
+
+
+async def _repost_final_and_recall(
+    user_id: str,
+    *,
+    is_group: bool,
+    notify_msg_id: str,
+    card_msg_id: str,
+    final: str,
+) -> bool:
+    """Recall the streaming card first; only send a fresh final card after recall succeeds."""
+    try:
+        await feishu.recall_message(card_msg_id)
+    except Exception as exc:
+        print(f"[warn] streaming card recall failed; skip final repost to avoid duplicates: {exc}", flush=True)
+        return True
+
+    try:
+        if is_group and notify_msg_id:
+            await feishu.reply_card(notify_msg_id, content=final, loading=False)
+        else:
+            await feishu.send_card_to_user(user_id, content=final, loading=False)
+    except Exception as exc:
+        print(f"[warn] final repost failed after recall: {exc}", flush=True)
+    return True
+
+
 # ── 命令菜单（锁外即时响应）──────────────────────────────────
 
 _COMMAND_MENU_GROUPS = [
@@ -123,6 +242,7 @@ _COMMAND_MENU_GROUPS = [
     ]),
     ("**配置**", [
         {"text": "🔄 切模型",      "value": {"action": "run_cmd", "cmd": "/model"}},
+        {"text": "🧠 思考深度",    "value": {"action": "run_cmd", "cmd": "/effort"}},
         {"text": "⚙️ 切模式",      "value": {"action": "run_cmd", "cmd": "/mode"}},
         {"text": "📁 工作空间",    "value": {"action": "run_cmd", "cmd": "/ws"}},
     ]),
@@ -214,7 +334,7 @@ async def handle_message_async(event: P2ImMessageReceiveV1):
             _text = ""
         # 群聊去掉 @mention
         if is_group:
-            for m in (getattr(msg, 'mentions', None) or []):
+            for m in _iter_mentions(msg):
                 k = getattr(m, 'key', '')
                 if k:
                     _text = _text.replace(k, '').strip()
@@ -234,7 +354,7 @@ async def handle_message_async(event: P2ImMessageReceiveV1):
 
     # 群聊只响应 @机器人 的消息
     if is_group:
-        mentions = getattr(msg, 'mentions', None) or []
+        mentions = _iter_mentions(msg)
         if not mentions:
             return  # 没有 @mention，忽略
 
@@ -250,7 +370,7 @@ async def handle_message_async(event: P2ImMessageReceiveV1):
         if len(_chat_locks) >= _MAX_CHAT_LOCKS:
             # 只清理未持有的锁，避免误杀正在使用的锁导致并发串行保护失效
             idle = [k for k, v in _chat_locks.items() if not v.locked()]
-            for k in idle[:len(idle) // 2]:
+            for k in idle:
                 del _chat_locks[k]
         _chat_locks[chat_id] = asyncio.Lock()
     lock = _chat_locks[chat_id]
@@ -270,12 +390,14 @@ async def _run_and_display(
 ):
     """调用 Claude 并流式展示结果，检测选项时附加按钮。消息处理和按钮回复共用此函数。"""
     active_run = _active_runs.start_run(user_id, card_msg_id)
+    run_started_at = time.time()
 
     accumulated = ""
     tool_history: list[str] = []
     ask_options: list[tuple[str, str]] = []  # AskUserQuestion 解析出的选项
     plan_exited = False  # Claude 调了 ExitPlanMode
     last_push_time = 0.0
+    last_push_len = 0
     push_failures = 0
     _PUSH_INTERVAL = 0.4
     _MAX_STREAM_DISPLAY = 2500
@@ -341,12 +463,16 @@ async def _run_and_display(
         last_push_time = time.time()
 
     async def on_text_chunk(chunk: str):
-        nonlocal accumulated, last_push_time
+        nonlocal accumulated, last_push_time, last_push_len
         accumulated += chunk
         now = time.time()
-        if now - last_push_time >= _PUSH_INTERVAL:
+        if (
+            now - last_push_time >= _PUSH_INTERVAL
+            or len(accumulated) - last_push_len >= config.STREAM_CHUNK_SIZE
+        ):
             await push(_build_display())
             last_push_time = now
+            last_push_len = len(accumulated)
 
     claude_msg = text
     try:
@@ -357,6 +483,7 @@ async def _run_and_display(
             model=session.model,
             cwd=session.cwd,
             permission_mode=session.permission_mode,
+            effort=session.effort,
             on_text_chunk=on_text_chunk,
             on_tool_use=on_tool_use,
             on_process_start=lambda proc: _active_runs.attach_process(user_id, proc),
@@ -371,6 +498,12 @@ async def _run_and_display(
             await feishu.update_card(card_msg_id, f"❌ Claude 执行出错：{type(e).__name__}: {e}")
         except Exception:
             pass
+        await _send_completion_notice(
+            user_id,
+            is_group=is_group,
+            notify_msg_id=notify_msg_id,
+            text="❌ 失败",
+        )
         return
     finally:
         _active_runs.clear_run(user_id, active_run)
@@ -407,14 +540,20 @@ async def _run_and_display(
         except Exception as fallback_err:
             print(f"[error] 文本回退也失败: {fallback_err}", flush=True)
 
-    if card_patched:
-        try:
-            if is_group and notify_msg_id:
-                await feishu.reply_text(notify_msg_id, "✅")
-            else:
-                await feishu.send_text_to_user(user_id, "✅")
-        except Exception:
-            pass
+    if card_patched and not options:
+        duration_sec = time.time() - run_started_at
+        if _should_final_repost(duration_sec, has_options=False):
+            reposted = await _repost_final_and_recall(
+                user_id,
+                is_group=is_group,
+                notify_msg_id=notify_msg_id,
+                card_msg_id=card_msg_id,
+                final=final,
+            )
+            if not reposted:
+                await _send_completion_notice(user_id, is_group=is_group, notify_msg_id=notify_msg_id)
+
+    await _send_local_media_refs(user_id, is_group=is_group, notify_msg_id=notify_msg_id, text=final)
 
     if new_session_id:
         await store.on_claude_response(user_id, chat_id, new_session_id, text)
@@ -449,8 +588,7 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
 
         # 群聊：去掉 @mention 占位符
         if is_group:
-            mentions = getattr(msg, 'mentions', None) or []
-            for mention in mentions:
+            for mention in _iter_mentions(msg):
                 key = getattr(mention, 'key', '')
                 if key:
                     text = text.replace(key, '').strip()
@@ -475,6 +613,31 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
                     pass
             else:
                 await feishu.send_text_to_user(user_id, f"❌ 下载图片失败：{e}")
+            return
+
+    elif msg.message_type == "file":
+        try:
+            payload = json.loads(msg.content)
+            file_key = payload.get("file_key", "") or payload.get("fileKey", "")
+            file_name = payload.get("file_name", "") or payload.get("name", "") or payload.get("fileName", "")
+            if not file_key:
+                print(f"[warn] file message without file_key: {payload}", flush=True)
+                return
+            file_path = await feishu.download_file(msg.message_id, file_key, file_name or None)
+            print(f"[file] downloaded name={file_name or '-'} path={file_path}", flush=True)
+            text = (
+                f"[用户发送了一个文件，文件名：{file_name or os.path.basename(file_path)}，"
+                f"路径：{file_path}。请按用户要求读取/转换/处理这个文件，直接回复用中文。]"
+            )
+        except Exception as e:
+            print(f"[error] 下载文件失败: {e}", flush=True)
+            if is_group:
+                try:
+                    await feishu.reply_card(msg.message_id, content=f"❌ 下载文件失败：{e}", loading=False)
+                except Exception:
+                    pass
+            else:
+                await feishu.send_text_to_user(user_id, f"❌ 下载文件失败：{e}")
             return
 
     else:
@@ -1006,14 +1169,14 @@ def main():
     print(f"   默认工作目录: {config.DEFAULT_CWD}")
     print(f"   权限模式    : {config.PERMISSION_MODE}")
 
-    # 卡片回调 HTTP 服务 + ngrok 隧道
+    # 卡片回调 HTTP 服务 + ngrok/显式公网 URL
     cb_port = config.CALLBACK_PORT
     _start_callback_server(cb_port)
-    ngrok_url = _start_ngrok(cb_port)
+    ngrok_url = config.CALLBACK_PUBLIC_URL or _start_ngrok(cb_port)
     if ngrok_url:
         print(f"   卡片回调    : {ngrok_url}/callback")
     else:
-        print(f"   卡片回调    : http://localhost:{cb_port}/callback (需启动 ngrok)")
+        print(f"   卡片回调    : http://localhost:{cb_port}/callback (需启动 ngrok 或设置 CALLBACK_PUBLIC_URL)")
 
     handler = lark.EventDispatcherHandler.builder("", "") \
         .register_p2_im_message_receive_v1(on_message_receive) \
