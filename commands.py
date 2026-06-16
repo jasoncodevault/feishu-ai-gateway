@@ -10,7 +10,8 @@ import os
 import shlex
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional, Tuple
 
 from bot_config import AGENT_BACKEND, CLAUDE_CLI, CODEX_CLI, DEFAULT_CWD, DEFAULT_MODEL
@@ -153,7 +154,8 @@ CODEX_HELP_TEXT = """\
 **查看能力：**
 `/skills` — 列出已安装的 Codex Skills（如有）
 `/mcp` — 列出已配置的 Codex MCP Servers
-`/usage` — 说明 Codex 用量查询状态
+`/usage` — 查看 Codex 本地 token 统计（今日 / 近 7 天 / 累计）
+`/import` — Codex TUI 交互导入 Claude Code 设置/聊天（Feishu 非交互仅提示）
 
 **Codex Skills / MCP：**
 其他 `/xxx` 会自动转发给 Codex 处理；已配置 MCP servers 可直接对话调用。
@@ -183,7 +185,7 @@ def parse_command(text: str) -> Optional[Tuple[str, str]]:
 # Bot 自身处理的命令，其余 /xxx 转发给 Claude
 BOT_COMMANDS = {
     "help", "h", "new", "clear", "resume", "model", "effort", "thinking", "think", "fast", "mode", "status", "cd", "ls",
-    "workspace", "ws", "skills", "mcp", "usage", "stop",
+    "workspace", "ws", "skills", "mcp", "usage", "import", "stop",
 }
 
 
@@ -421,17 +423,154 @@ def _load_claude_oauth_credentials() -> dict:
     raise FileNotFoundError("未找到 Claude Code OAuth 凭证（尝试 ~/.claude/.credentials.json 和 macOS Keychain）")
 
 
+def _format_token_count(tokens: int) -> str:
+    return f"{int(tokens):,}"
+
+
+def _codex_usage_home() -> Path:
+    return Path(os.getenv("CODEX_HOME") or os.path.expanduser("~/.codex"))
+
+
+def _parse_codex_timestamp(value: str, tz) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz)
+    except Exception:
+        return None
+
+
+def _format_codex_reset(ts) -> str:
+    if ts is None:
+        return "未知"
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(os.getenv("USAGE_TIMEZONE", "Asia/Shanghai"))
+        dt = datetime.fromtimestamp(int(ts), tz)
+        now = datetime.now(tz)
+        diff = dt - now
+        minutes_total = max(0, int(diff.total_seconds() // 60))
+        hours, minutes = divmod(minutes_total, 60)
+        return f"{dt.strftime('%m/%d %H:%M')}（{hours}h{minutes}m 后）"
+    except Exception:
+        return str(ts)
+
+
+def _format_codex_rate_window(label: str, data: Optional[dict]) -> Optional[str]:
+    if not isinstance(data, dict):
+        return None
+    used = data.get("used_percent")
+    reset = data.get("resets_at")
+    if used is None and reset is None:
+        return None
+    used_text = "未知" if used is None else f"{float(used):.1f}%"
+    return f"- {label}：{used_text}，重置：{_format_codex_reset(reset)}"
+
+
+def _get_codex_usage() -> str:
+    """Read Codex token usage from local rollout token_count events."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(os.getenv("USAGE_TIMEZONE", "Asia/Shanghai"))
+    except Exception:
+        tz = timezone.utc
+
+    codex_home = _codex_usage_home()
+    sessions_dir = codex_home / "sessions"
+    if not sessions_dir.exists():
+        return f"📊 **Codex 用量**\n\n未找到 Codex sessions 目录：`{sessions_dir}`"
+
+    now = datetime.now(tz)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    totals = {
+        "today": 0,
+        "week": 0,
+        "all": 0,
+        "cached": 0,
+        "output": 0,
+        "reasoning": 0,
+    }
+    event_count = 0
+    latest_rate_ts = None
+    latest_rate_limits = None
+
+    for path in sessions_dir.rglob("*.jsonl"):
+        try:
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = row.get("payload") if isinstance(row, dict) else None
+                    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                        continue
+                    dt = _parse_codex_timestamp(str(row.get("timestamp", "")), tz)
+                    if dt is None:
+                        continue
+                    usage = payload.get("info", {}).get("last_token_usage")
+                    if not isinstance(usage, dict):
+                        usage = payload.get("info", {}).get("total_token_usage")
+                    if not isinstance(usage, dict):
+                        continue
+                    total = int(usage.get("total_tokens") or 0)
+                    totals["all"] += total
+                    totals["cached"] += int(usage.get("cached_input_tokens") or 0)
+                    totals["output"] += int(usage.get("output_tokens") or 0)
+                    totals["reasoning"] += int(usage.get("reasoning_output_tokens") or 0)
+                    if dt >= week_start:
+                        totals["week"] += total
+                    if dt >= day_start:
+                        totals["today"] += total
+                    event_count += 1
+                    rate_limits = payload.get("rate_limits")
+                    if isinstance(rate_limits, dict) and (latest_rate_ts is None or dt > latest_rate_ts):
+                        latest_rate_ts = dt
+                        latest_rate_limits = rate_limits
+        except OSError:
+            continue
+
+    if event_count == 0:
+        return f"📊 **Codex 用量**\n\n未在 `{sessions_dir}` 找到 token_count 事件。"
+
+    lines = ["📊 **Codex 用量**", ""]
+    lines.append(f"今日：**{_format_token_count(totals['today'])} tokens**")
+    lines.append(f"近 7 天：**{_format_token_count(totals['week'])} tokens**")
+    lines.append(f"累计：**{_format_token_count(totals['all'])} tokens**")
+    lines.append("")
+    lines.append(
+        f"明细：cached input {_format_token_count(totals['cached'])} / "
+        f"output {_format_token_count(totals['output'])} / reasoning {_format_token_count(totals['reasoning'])}"
+    )
+    if latest_rate_limits:
+        plan = latest_rate_limits.get("plan_type") or "unknown"
+        lines.append("")
+        lines.append(f"**最近额度窗口**（plan: `{plan}`）")
+        for label, key in (("5小时窗口", "primary"), ("7天窗口", "secondary")):
+            rendered = _format_codex_rate_window(label, latest_rate_limits.get(key))
+            if rendered:
+                lines.append(rendered)
+    lines.append("")
+    lines.append(f"来源：`{sessions_dir}` 的 {event_count} 条 token_count 事件。")
+    return "\n".join(lines)
+
+
 def _get_usage() -> str:
     """
     发一个轻量 API 请求，从响应 headers 获取 Claude Max 订阅用量百分比和重置时间。
     支持 Linux/Docker 的 ~/.claude/.credentials.json，也兼容 macOS Keychain。
     """
     if AGENT_BACKEND == "codex":
-        return (
-            "📊 **Codex 用量**\n\n"
-            "当前 Codex CLI 没有暴露可稳定脚本读取的订阅/额度接口；"
-            "此命令仅确认当前 backend 是 Codex。"
-        )
+        return _get_codex_usage()
 
     import urllib.request
     import urllib.error
@@ -929,6 +1068,16 @@ async def handle_command(
 
     elif cmd == "usage":
         return _get_usage()
+
+    elif cmd == "import":
+        if AGENT_BACKEND == "codex":
+            return (
+                "📥 **Codex /import**\n\n"
+                "Codex 0.140.0 已支持在交互式 TUI 中用 `/import` 导入 Claude Code 的设置、配置和最近聊天。\n"
+                "当前 Feishu 网关运行的是 `codex exec` 非交互模式，不能安全代你完成选择式导入。\n\n"
+                "需要导入时，在服务器终端用同一个 Codex HOME 运行：`codex`，然后输入 `/import`。"
+            )
+        return "📥 `/import` 是 Codex 交互式 TUI 功能；当前 backend 不是 Codex。"
 
     elif cmd == "stop":
         return "⏹ /stop 命令在消息队列外处理，如果看到这条说明当前没有运行中的任务。"

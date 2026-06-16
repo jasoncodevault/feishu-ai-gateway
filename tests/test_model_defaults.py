@@ -202,3 +202,16 @@ def test_codex_usage_is_not_claude_oauth(monkeypatch):
 
     assert "Codex" in reply
     assert "Claude Code OAuth" not in reply
+
+
+@pytest.mark.asyncio
+async def test_codex_import_is_bot_command_not_forwarded(monkeypatch):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "codex", raising=False)
+    store = FakeStore()
+
+    assert "import" in commands.BOT_COMMANDS
+    reply = await handle_command("import", "", "user_1", "chat_1", store)
+
+    assert isinstance(reply, str)
+    assert "Codex /import" in reply
+    assert "codex exec" in reply
