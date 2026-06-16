@@ -217,7 +217,7 @@ async def run_claude(
 
         full_text = ""
         new_session_id = None
-        fast_mode_warning = ""
+        fast_mode_log = ""
         pending_tool_name = ""
         pending_tool_input_json = ""
 
@@ -310,12 +310,11 @@ async def run_claude(
                         actual_tier = usage.get("service_tier")
                         fast_state = data.get("fast_mode_state")
                         if actual_speed == "standard" or actual_tier == "standard" or fast_state == "off":
-                            fast_mode_warning = (
-                                "\n\n⚠️ Claude Fast 未实际生效：Claude Code 返回 "
-                                f"`speed={actual_speed or 'unknown'}`, "
-                                f"`service_tier={actual_tier or 'unknown'}`, "
-                                f"`fast_mode_state={fast_state or 'unknown'}`。"
-                                "这说明当前账号/配置/可用性没有进入 Fast serving path；不是 `/effort low` 问题。"
+                            fast_mode_log = (
+                                "Claude Fast requested but not active: "
+                                f"speed={actual_speed or 'unknown'}, "
+                                f"service_tier={actual_tier or 'unknown'}, "
+                                f"fast_mode_state={fast_state or 'unknown'}"
                             )
 
         except RuntimeError:
@@ -324,8 +323,8 @@ async def run_claude(
         stderr_output = await proc.stderr.read()
         await proc.wait()
         stderr_text = stderr_output.decode("utf-8", errors="replace").strip()
-        if fast_mode_warning and full_text:
-            full_text += fast_mode_warning
+        if fast_mode_log:
+            print(f"[run_claude] {fast_mode_log}", flush=True)
         return full_text.strip(), new_session_id, proc.returncode, stderr_text
 
     runner = _run_codex_once if AGENT_BACKEND == "codex" else _run_once

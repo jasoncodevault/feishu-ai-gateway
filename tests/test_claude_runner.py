@@ -328,7 +328,7 @@ def test_run_claude_backend_passes_native_fast_mode_setting(monkeypatch):
     assert captured["args"][captured["args"].index("--model") + 1] == "claude-opus-4-8"
 
 
-def test_run_claude_backend_warns_when_fast_request_returns_standard(monkeypatch):
+def test_run_claude_backend_does_not_pollute_reply_when_fast_request_returns_standard(monkeypatch, capsys):
     proc = FakeProc([
         b'{"type":"system","session_id":"sid_standard"}\n',
         b'{"type":"result","session_id":"sid_standard","result":"Done","fast_mode_state":"off","usage":{"speed":"standard","service_tier":"standard"}}\n',
@@ -345,6 +345,6 @@ def test_run_claude_backend_warns_when_fast_request_returns_standard(monkeypatch
 
     assert session_id == "sid_standard"
     assert used_fallback is False
-    assert text.startswith("Done")
-    assert "Claude Fast 未实际生效" in text
-    assert "speed=standard" in text
+    assert text == "Done"
+    assert "Claude Fast 未实际生效" not in text
+    assert "Claude Fast requested but not active" in capsys.readouterr().out
