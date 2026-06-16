@@ -299,3 +299,30 @@ def test_run_claude_codex_backend_passes_native_fast_service_tier(monkeypatch):
     assert used_fallback is False
     assert 'service_tier="fast"' in captured["args"]
     assert "features.fast_mode=true" in captured["args"]
+
+
+def test_run_claude_backend_passes_native_fast_mode_setting(monkeypatch):
+    proc = FakeProc([
+        b'{"type":"system","session_id":"sid_fast"}\n',
+        b'{"type":"result","session_id":"sid_fast","result":"Fast"}\n',
+    ])
+    captured = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(claude_runner, "AGENT_BACKEND", "claude", raising=False)
+    monkeypatch.setattr(claude_runner, "CLAUDE_CLI", "claude", raising=False)
+
+    text, session_id, used_fallback = asyncio.run(run_claude("hi", model="claude-sonnet-4-6", service_tier="fast"))
+
+    assert text == "Fast"
+    assert session_id == "sid_fast"
+    assert used_fallback is False
+    assert "--settings" in captured["args"]
+    settings = captured["args"][captured["args"].index("--settings") + 1]
+    assert '"fastMode":true' in settings.replace(" ", "")
+    assert "--model" in captured["args"]
+    assert captured["args"][captured["args"].index("--model") + 1] == "claude-opus-4-8"

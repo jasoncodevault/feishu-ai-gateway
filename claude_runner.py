@@ -179,10 +179,15 @@ async def run_claude(
         ]
         if active_session_id:
             cmd += ["--resume", active_session_id]
-        if model:
-            cmd += ["--model", model]
+        active_model = model
+        if service_tier == "fast" and (not active_model or "opus" not in active_model.lower()):
+            active_model = "claude-opus-4-8"
+        if active_model:
+            cmd += ["--model", active_model]
         if effort and effort != "auto":
             cmd += ["--effort", effort]
+        if service_tier in ("fast", "standard"):
+            cmd += ["--settings", json.dumps({"fastMode": service_tier == "fast"}, separators=(",", ":"))]
 
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)

@@ -110,7 +110,7 @@ HELP_TEXT = """\
 `/new` 或 `/clear` — 开始新 session
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换模型（fable / opus / sonnet / haiku 或完整 ID）
-`/fast` — 切到快速模式（等同 `/effort low`）
+`/fast [on|off|status]` — Claude Code 原生 Fast 模式（Opus 专用，约 2.5× 输出速度，成本更高）
 `/effort [级别]` — 切换思考深度（low / medium / high / xhigh / max / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
@@ -829,6 +829,24 @@ async def _handle_workspace_command(
     )
 
 
+def _claude_fast_disabled_reason() -> Optional[str]:
+    """Return a human-readable reason when Claude Code Fast cannot be enabled."""
+    path = Path(os.getenv("CLAUDE_CONFIG_JSON") or os.path.expanduser("~/.claude.json"))
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    account = data.get("oauthAccount") if isinstance(data, dict) else None
+    if not isinstance(account, dict):
+        return None
+    if account.get("hasExtraUsageEnabled") is False:
+        reason = data.get("cachedExtraUsageDisabledReason") or account.get("extraUsageDisabledReason") or "extra_usage_disabled"
+        return f"Claude Code extra usage 未启用（{reason}）。Fast mode 需要 usage credits/extra usage。"
+    return None
+
+
 async def handle_command(
     cmd: str,
     args: str,
@@ -949,14 +967,22 @@ async def handle_command(
                 return f"📊 当前 Codex 服务档位：**{tier}**"
             return "❌ 用法：`/fast` 或 `/fast on` 开启，`/fast off` 关闭，`/fast status` 查看。"
 
-        if not args:
-            args = "low"
-        normalized = "".join(args.lower().split())
-        effort = EFFORT_ALIASES.get(normalized, args.lower().strip())
-        if effort not in VALID_EFFORTS:
-            return f"❌ 未知思考深度：`{args}`\n可选：{', '.join(f'`{m}`' for m in VALID_EFFORTS)}"
-        await store.set_effort(user_id, chat_id, effort)
-        return f"✅ 已切换快速思考深度为 **{effort}** — {VALID_EFFORTS[effort]}"
+        normalized = args.lower().strip() or "on"
+        if normalized in ("on", "enable", "enabled", "true", "1"):
+            disabled_reason = _claude_fast_disabled_reason()
+            if disabled_reason:
+                return f"⚠️ Claude Fast 模式当前不可用：{disabled_reason}\n\n我没有改模型或 session 设置，避免变成更贵但不加速的标准 Opus。"
+            await store.set_service_tier(user_id, chat_id, "fast")
+            await store.set_model(user_id, chat_id, "claude-opus-4-8")
+            return "✅ 已开启 Claude Fast 模式：Claude Code 将使用 Opus 4.8 Fast serving path（约 2.5× 输出速度，成本更高）。"
+        if normalized in ("off", "disable", "disabled", "false", "0"):
+            await store.set_service_tier(user_id, chat_id, "standard")
+            return "✅ 已关闭 Claude Fast 模式，恢复标准服务档位。"
+        if normalized in ("status", "s"):
+            cur = await store.get_current(user_id, chat_id)
+            tier = getattr(cur, "service_tier", "standard") or "standard"
+            return f"📊 当前 Claude Fast 档位：**{tier}**"
+        return "❌ 用法：`/fast` 或 `/fast on` 开启，`/fast off` 关闭，`/fast status` 查看。"
 
     elif cmd in ("effort", "thinking", "think"):
         if AGENT_BACKEND == "codex":
@@ -1018,7 +1044,7 @@ async def handle_command(
             f"Session ID: `{sid}`\n"
             f"模型: `{model}`\n"
             f"思考深度: `{effort}`\n"
-            f"Codex Fast: `{service_tier}`\n"
+            f"{'Codex' if AGENT_BACKEND == 'codex' else 'Claude'} Fast: `{service_tier}`\n"
             f"权限模式: `{mode}`\n"
             f"工作空间: `{workspace}`\n"
             f"工作目录: `{cwd}`\n"
