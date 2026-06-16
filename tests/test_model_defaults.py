@@ -145,27 +145,6 @@ async def test_claude_fast_off_disables_native_fast_mode(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_claude_fast_refuses_when_extra_usage_disabled(monkeypatch, tmp_path):
-    monkeypatch.setattr(commands, "AGENT_BACKEND", "claude", raising=False)
-    config = tmp_path / "claude.json"
-    config.write_text(
-        '{"oauthAccount":{"hasExtraUsageEnabled":false},"cachedExtraUsageDisabledReason":"org_level_disabled"}',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CLAUDE_CONFIG_JSON", str(config))
-    store = FakeStore()
-
-    reply = await handle_command("fast", "on", "user_1", "chat_1", store)
-
-    assert isinstance(reply, str)
-    assert "当前不可用" in reply
-    assert "org_level_disabled" in reply
-    assert store.service_tier_calls == []
-    assert store.model_calls == []
-    assert store.effort_calls == []
-
-
-@pytest.mark.asyncio
 async def test_codex_fast_enables_native_fast_service_tier(monkeypatch):
     monkeypatch.setattr(commands, "AGENT_BACKEND", "codex", raising=False)
     store = FakeStore()

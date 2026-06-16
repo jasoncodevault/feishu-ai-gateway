@@ -829,24 +829,6 @@ async def _handle_workspace_command(
     )
 
 
-def _claude_fast_disabled_reason() -> Optional[str]:
-    """Return a human-readable reason when Claude Code Fast cannot be enabled."""
-    path = Path(os.getenv("CLAUDE_CONFIG_JSON") or os.path.expanduser("~/.claude.json"))
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    account = data.get("oauthAccount") if isinstance(data, dict) else None
-    if not isinstance(account, dict):
-        return None
-    if account.get("hasExtraUsageEnabled") is False:
-        reason = data.get("cachedExtraUsageDisabledReason") or account.get("extraUsageDisabledReason") or "extra_usage_disabled"
-        return f"Claude Code extra usage 未启用（{reason}）。Fast mode 需要 usage credits/extra usage。"
-    return None
-
-
 async def handle_command(
     cmd: str,
     args: str,
@@ -969,12 +951,9 @@ async def handle_command(
 
         normalized = args.lower().strip() or "on"
         if normalized in ("on", "enable", "enabled", "true", "1"):
-            disabled_reason = _claude_fast_disabled_reason()
-            if disabled_reason:
-                return f"⚠️ Claude Fast 模式当前不可用：{disabled_reason}\n\n我没有改模型或 session 设置，避免变成更贵但不加速的标准 Opus。"
             await store.set_service_tier(user_id, chat_id, "fast")
             await store.set_model(user_id, chat_id, "claude-opus-4-8")
-            return "✅ 已开启 Claude Fast 模式：Claude Code 将使用 Opus 4.8 Fast serving path（约 2.5× 输出速度，成本更高）。"
+            return "✅ 已设置 Claude Fast 目标模式：后续请求将使用 Opus 4.8 并请求 Fast；实际是否进入 Fast 会按 Claude Code 返回的 `usage.speed` 校验。"
         if normalized in ("off", "disable", "disabled", "false", "0"):
             await store.set_service_tier(user_id, chat_id, "standard")
             return "✅ 已关闭 Claude Fast 模式，恢复标准服务档位。"

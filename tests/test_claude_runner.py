@@ -326,3 +326,25 @@ def test_run_claude_backend_passes_native_fast_mode_setting(monkeypatch):
     assert '"fastMode":true' in settings.replace(" ", "")
     assert "--model" in captured["args"]
     assert captured["args"][captured["args"].index("--model") + 1] == "claude-opus-4-8"
+
+
+def test_run_claude_backend_warns_when_fast_request_returns_standard(monkeypatch):
+    proc = FakeProc([
+        b'{"type":"system","session_id":"sid_standard"}\n',
+        b'{"type":"result","session_id":"sid_standard","result":"Done","fast_mode_state":"off","usage":{"speed":"standard","service_tier":"standard"}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(claude_runner, "AGENT_BACKEND", "claude", raising=False)
+    monkeypatch.setattr(claude_runner, "CLAUDE_CLI", "claude", raising=False)
+
+    text, session_id, used_fallback = asyncio.run(run_claude("hi", model="claude-opus-4-8", service_tier="fast"))
+
+    assert session_id == "sid_standard"
+    assert used_fallback is False
+    assert text.startswith("Done")
+    assert "Claude Fast 未实际生效" in text
+    assert "speed=standard" in text
