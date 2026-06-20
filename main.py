@@ -82,6 +82,7 @@ FINAL_REPOST_MIN_DURATION_SEC = 30.0
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _MARKDOWN_MEDIA_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 _MEDIA_TOKEN_RE = re.compile(r"MEDIA:(/[^\s)]+)")
+_TOPIC_CHAT_DELIM = "#topic:"
 
 
 def _clean_local_path_ref(ref: str) -> str:
@@ -117,6 +118,7 @@ async def _send_local_media_refs(
     is_group: bool,
     notify_msg_id: str,
     text: str,
+    reply_in_thread: bool = False,
 ) -> None:
     """Upload and send local media files referenced in the final answer."""
     refs = _iter_local_media_refs(text)
@@ -126,13 +128,13 @@ async def _send_local_media_refs(
         try:
             ext = os.path.splitext(path)[1].lower()
             if ext in _IMAGE_EXTS:
-                if is_group and notify_msg_id:
-                    await feishu.reply_image(notify_msg_id, path)
+                if _should_use_reply_api(is_group, reply_in_thread) and notify_msg_id:
+                    await feishu.reply_image(notify_msg_id, path, reply_in_thread=reply_in_thread)
                 else:
                     await feishu.send_image_to_user(user_id, path)
             else:
-                if is_group and notify_msg_id:
-                    await feishu.reply_file(notify_msg_id, path)
+                if _should_use_reply_api(is_group, reply_in_thread) and notify_msg_id:
+                    await feishu.reply_file(notify_msg_id, path, reply_in_thread=reply_in_thread)
                 else:
                     await feishu.send_file_to_user(user_id, path)
             print(f"[media] sent local file: {path}", flush=True)
@@ -153,6 +155,48 @@ def _iter_mentions(msg) -> list:
         return []
 
 
+def _message_topic_id(msg) -> str:
+    """Return Feishu topic/thread id for topic-group messages, if present."""
+    for attr in ("thread_id", "root_id"):
+        value = getattr(msg, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _message_reply_target_id(msg) -> str:
+    """Return the Feishu message id that should receive our reply.
+
+    Topic-group replies should target the topic root/parent message rather than
+    the child reply message. Replying to the child with reply_in_thread=True can
+    render outside the expected topic location in Feishu.
+    """
+    for attr in ("parent_id", "root_id", "message_id"):
+        value = getattr(msg, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _topic_chat_key(chat_id: str, topic_id: str) -> str:
+    """Session/lock key for a Feishu chat, scoped to topic when available."""
+    return f"{chat_id}{_TOPIC_CHAT_DELIM}{topic_id}" if topic_id else chat_id
+
+
+def _chat_key_has_topic(chat_id: str) -> bool:
+    return _TOPIC_CHAT_DELIM in (chat_id or "")
+
+
+def _should_use_reply_api(is_group: bool, reply_in_thread: bool) -> bool:
+    """Use Feishu reply API for groups and for topic/thread replies in p2p chats."""
+    return is_group or reply_in_thread
+
+
+def _run_key(user_id: str, chat_id: str) -> str:
+    """Scope active runs to the conversation key, not just the user."""
+    return f"{user_id}:{chat_id}"
+
+
 # ── /stop 命令处理 ───────────────────────────────────────────
 
 async def _announce_stopped_run(active_run: ActiveRun):
@@ -169,15 +213,17 @@ async def _announce_interrupted(active_run: ActiveRun):
         pass
 
 
-async def _handle_stop_command(sender_open_id: str) -> str:
-    active_run = _active_runs.get_run(sender_open_id)
+async def _handle_stop_command(sender_open_id: str, chat_id: str | None = None) -> str:
+    chat_id = chat_id or sender_open_id
+    run_key = _run_key(sender_open_id, chat_id)
+    active_run = _active_runs.get_run(run_key)
     if active_run is None:
         return "当前没有正在运行的任务"
     if active_run.stop_requested:
         return "正在停止当前任务，请稍候"
     stopped = await stop_run(
         _active_runs,
-        sender_open_id,
+        run_key,
         on_stopped=_announce_stopped_run,
     )
     if not stopped:
@@ -191,11 +237,12 @@ async def _send_completion_notice(
     is_group: bool,
     notify_msg_id: str,
     text: str = "✅ 已完成",
+    reply_in_thread: bool = False,
 ) -> None:
     """Send the shortest possible trailing status notice."""
     try:
-        if is_group and notify_msg_id:
-            await feishu.reply_text(notify_msg_id, text)
+        if _should_use_reply_api(is_group, reply_in_thread) and notify_msg_id:
+            await feishu.reply_text(notify_msg_id, text, reply_in_thread=reply_in_thread)
         else:
             await feishu.send_text_to_user(user_id, text)
     except Exception as exc:
@@ -213,6 +260,7 @@ async def _repost_final_and_recall(
     notify_msg_id: str,
     card_msg_id: str,
     final: str,
+    reply_in_thread: bool = False,
 ) -> bool:
     """Recall the streaming card first; only send a fresh final card after recall succeeds."""
     try:
@@ -222,8 +270,8 @@ async def _repost_final_and_recall(
         return True
 
     try:
-        if is_group and notify_msg_id:
-            await feishu.reply_card(notify_msg_id, content=final, loading=False)
+        if _should_use_reply_api(is_group, reply_in_thread) and notify_msg_id:
+            await feishu.reply_card(notify_msg_id, content=final, loading=False, reply_in_thread=reply_in_thread)
         else:
             await feishu.send_card_to_user(user_id, content=final, loading=False)
     except Exception as exc:
@@ -258,14 +306,20 @@ _COMMAND_MENU_GROUPS = [
 ]
 
 
-async def _show_command_menu(user_id: str, chat_id: str, is_group: bool, msg_id: str):
+async def _show_command_menu(
+    user_id: str,
+    chat_id: str,
+    is_group: bool,
+    msg_id: str,
+    reply_in_thread: bool = False,
+):
     """显示分组命令菜单（markdown 标题 + 按钮混排），不走队列锁"""
     elements = []
     for title, buttons in _COMMAND_MENU_GROUPS:
         elements.append({"tag": "markdown", "content": title})
         columns = []
         for btn in buttons:
-            value = {**btn["value"], "cid": chat_id}
+            value = {**btn["value"], "cid": chat_id, "rid": msg_id}
             columns.append({
                 "tag": "column",
                 "width": "auto",
@@ -281,8 +335,8 @@ async def _show_command_menu(user_id: str, chat_id: str, is_group: bool, msg_id:
             })
         elements.append({"tag": "column_set", "flex_mode": "flow", "columns": columns})
     try:
-        if is_group:
-            card_id = await feishu.reply_card(msg_id, content="⚡ 快捷命令", loading=False)
+        if _should_use_reply_api(is_group, reply_in_thread):
+            card_id = await feishu.reply_card(msg_id, content="⚡ 快捷命令", loading=False, reply_in_thread=reply_in_thread)
         else:
             card_id = await feishu.send_card_to_user(user_id, content="⚡ 快捷命令", loading=False)
         await feishu.update_card_elements(card_id, elements)
@@ -302,18 +356,21 @@ def extract_chat_info(event: P2ImMessageReceiveV1) -> tuple[str, str, bool]:
         - For group chat: chat_id = group's chat_id
     """
     sender = event.event.sender
-    user_id = sender.sender_id.open_id
+    user_id = sender.sender_id.open_id or ""
 
     message = event.event.message
     chat_type = message.chat_type
-    chat_id_raw = message.chat_id
+    chat_id_raw = message.chat_id or ""
 
     is_group = (chat_type == "group")
 
     if is_group:
-        chat_id = chat_id_raw
+        topic_id = _message_topic_id(message)
+        chat_id = _topic_chat_key(chat_id_raw, topic_id)
     else:
-        chat_id = user_id
+        topic_id = _message_topic_id(message)
+        base_chat_id = chat_id_raw or user_id
+        chat_id = _topic_chat_key(base_chat_id, topic_id) if topic_id else user_id
 
     return user_id, chat_id, is_group
 
@@ -326,6 +383,20 @@ async def handle_message_async(event: P2ImMessageReceiveV1):
     # Extract chat info (supports both private and group chats)
     user_id, chat_id, is_group = extract_chat_info(event)
     print(f"[Chat Info] user={user_id[:8]}... chat={chat_id[:8]}... is_group={is_group}", flush=True)
+
+    reply_in_thread = _chat_key_has_topic(chat_id)
+    reply_target_msg_id = _message_reply_target_id(msg)
+    print(
+        "[Thread Info] "
+        f"chat_type={getattr(msg, 'chat_type', '')} "
+        f"raw_chat={str(getattr(msg, 'chat_id', '') or '')[:12]} "
+        f"thread={str(getattr(msg, 'thread_id', '') or '')[:16]} "
+        f"root={str(getattr(msg, 'root_id', '') or '')[:16]} "
+        f"parent={str(getattr(msg, 'parent_id', '') or '')[:16]} "
+        f"target={reply_target_msg_id[:16]} "
+        f"reply_in_thread={reply_in_thread}",
+        flush=True,
+    )
 
     # /stop 和 / 在锁外处理（不需要排队等 Claude）
     if msg.message_type == "text":
@@ -341,16 +412,16 @@ async def handle_message_async(event: P2ImMessageReceiveV1):
                     _text = _text.replace(k, '').strip()
 
         if _text.lower() in ("/stop", "/stop") or _text.strip().endswith("/stop"):
-            reply = await _handle_stop_command(user_id)
-            if is_group:
-                await feishu.reply_card(msg.message_id, content=reply, loading=False)
+            reply = await _handle_stop_command(user_id, chat_id)
+            if _should_use_reply_api(is_group, reply_in_thread):
+                await feishu.reply_card(reply_target_msg_id, content=reply, loading=False, reply_in_thread=reply_in_thread)
             else:
                 await feishu.send_card_to_user(user_id, content=reply, loading=False)
             return
 
         # 单独输入 / → 显示命令菜单（按钮）
         if _text == "/":
-            await _show_command_menu(user_id, chat_id, is_group, msg.message_id)
+            await _show_command_menu(user_id, chat_id, is_group, reply_target_msg_id, reply_in_thread=reply_in_thread)
             return
 
     # 群聊只响应 @机器人 的消息
@@ -359,11 +430,12 @@ async def handle_message_async(event: P2ImMessageReceiveV1):
         if not mentions:
             return  # 没有 @mention，忽略
 
-    # 自动打断：新消息到达时，停止该用户的活跃任务（模拟终端 Escape）
-    active = _active_runs.get_run(user_id)
+    # 自动打断：同一用户在同一会话键里发新消息时，停止该会话的活跃任务（模拟终端 Escape）
+    run_key = _run_key(user_id, chat_id)
+    active = _active_runs.get_run(run_key)
     if active and not active.stop_requested:
         print(f"[打断] 新消息到达，自动停止当前任务", flush=True)
-        await stop_run(_active_runs, user_id, on_stopped=_announce_interrupted)
+        await stop_run(_active_runs, run_key, on_stopped=_announce_interrupted)
 
     # 获取该群组的队列锁，保证同一群组消息串行处理，不同群组可并发
     if chat_id not in _chat_locks:
@@ -388,9 +460,11 @@ async def handle_message_async(event: P2ImMessageReceiveV1):
 async def _run_and_display(
     user_id: str, chat_id: str, is_group: bool,
     text: str, card_msg_id: str, session, notify_msg_id: str,
+    reply_in_thread: bool = False,
 ):
     """调用 Claude 并流式展示结果，检测选项时附加按钮。消息处理和按钮回复共用此函数。"""
-    active_run = _active_runs.start_run(user_id, card_msg_id)
+    run_key = _run_key(user_id, chat_id)
+    active_run = _active_runs.start_run(run_key, card_msg_id)
     run_started_at = time.time()
 
     accumulated = ""
@@ -476,6 +550,10 @@ async def _run_and_display(
             last_push_len = len(accumulated)
 
     claude_msg = text
+
+    def on_process_start(proc):
+        _active_runs.attach_process(run_key, proc)
+
     try:
         print(f"[run_claude] 开始调用...", flush=True)
         full_text, new_session_id, used_fresh_session_fallback = await run_claude(
@@ -488,7 +566,7 @@ async def _run_and_display(
             service_tier=session.service_tier,
             on_text_chunk=on_text_chunk,
             on_tool_use=on_tool_use,
-            on_process_start=lambda proc: _active_runs.attach_process(user_id, proc),
+            on_process_start=on_process_start,
         )
         print(f"[run_claude] 完成, session={new_session_id}", flush=True)
     except Exception as e:
@@ -505,10 +583,11 @@ async def _run_and_display(
             is_group=is_group,
             notify_msg_id=notify_msg_id,
             text="❌ 失败",
+            reply_in_thread=reply_in_thread,
         )
         return
     finally:
-        _active_runs.clear_run(user_id, active_run)
+        _active_runs.clear_run(run_key, active_run)
 
     # 最终更新卡片，检测选项时附加按钮
     # AskUserQuestion 的内容在 accumulated 里，full_text 可能不含，需要兜底
@@ -523,7 +602,7 @@ async def _run_and_display(
     try:
         if options:
             buttons = [
-                {"text": display, "value": {"reply": value, "cid": chat_id}}
+                {"text": display, "value": {"reply": value, "cid": chat_id, "rid": notify_msg_id}}
                 for display, value in options
             ]
             # 短选项(Y/N等)横排，长选项竖排
@@ -535,8 +614,8 @@ async def _run_and_display(
     except Exception as e:
         print(f"[error] 卡片更新失败，回退发文本: {e}", flush=True)
         try:
-            if is_group and notify_msg_id:
-                await feishu.reply_card(notify_msg_id, content=final, loading=False)
+            if _should_use_reply_api(is_group, reply_in_thread) and notify_msg_id:
+                await feishu.reply_card(notify_msg_id, content=final, loading=False, reply_in_thread=reply_in_thread)
             else:
                 await feishu.send_text_to_user(user_id, final)
         except Exception as fallback_err:
@@ -551,11 +630,23 @@ async def _run_and_display(
                 notify_msg_id=notify_msg_id,
                 card_msg_id=card_msg_id,
                 final=final,
+                reply_in_thread=reply_in_thread,
             )
             if not reposted:
-                await _send_completion_notice(user_id, is_group=is_group, notify_msg_id=notify_msg_id)
+                await _send_completion_notice(
+                    user_id,
+                    is_group=is_group,
+                    notify_msg_id=notify_msg_id,
+                    reply_in_thread=reply_in_thread,
+                )
 
-    await _send_local_media_refs(user_id, is_group=is_group, notify_msg_id=notify_msg_id, text=final)
+    await _send_local_media_refs(
+        user_id,
+        is_group=is_group,
+        notify_msg_id=notify_msg_id,
+        text=final,
+        reply_in_thread=reply_in_thread,
+    )
 
     if new_session_id:
         await store.on_claude_response(user_id, chat_id, new_session_id, text)
@@ -566,8 +657,8 @@ async def _run_and_display(
         await store.set_permission_mode(user_id, chat_id, "bypassPermissions")
         try:
             notice = "🚀 已退出规划模式，发送任意消息开始执行。"
-            if is_group and notify_msg_id:
-                await feishu.reply_text(notify_msg_id, notice)
+            if _should_use_reply_api(is_group, reply_in_thread) and notify_msg_id:
+                await feishu.reply_text(notify_msg_id, notice, reply_in_thread=reply_in_thread)
             else:
                 await feishu.send_text_to_user(user_id, notice)
         except Exception:
@@ -577,6 +668,8 @@ async def _run_and_display(
 async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
     """实际处理消息的逻辑，在 per-chat lock 保护下执行"""
     print(f"[处理消息] user={user_id[:8]}... chat={chat_id[:8]}... is_group={is_group}", flush=True)
+    reply_in_thread = _chat_key_has_topic(chat_id)
+    reply_target_msg_id = _message_reply_target_id(msg)
     text = ""
     img_path = None
 
@@ -608,9 +701,9 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
             text = f"[用户发送了一张图片，路径：{img_path}，请读取并分析这张图片，直接回复用中文]"
         except Exception as e:
             print(f"[error] 下载图片失败: {e}")
-            if is_group:
+            if _should_use_reply_api(is_group, reply_in_thread):
                 try:
-                    await feishu.reply_card(msg.message_id, content=f"❌ 下载图片失败：{e}", loading=False)
+                    await feishu.reply_card(reply_target_msg_id, content=f"❌ 下载图片失败：{e}", loading=False, reply_in_thread=reply_in_thread)
                 except Exception:
                     pass
             else:
@@ -633,9 +726,9 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
             )
         except Exception as e:
             print(f"[error] 下载文件失败: {e}", flush=True)
-            if is_group:
+            if _should_use_reply_api(is_group, reply_in_thread):
                 try:
-                    await feishu.reply_card(msg.message_id, content=f"❌ 下载文件失败：{e}", loading=False)
+                    await feishu.reply_card(reply_target_msg_id, content=f"❌ 下载文件失败：{e}", loading=False, reply_in_thread=reply_in_thread)
                 except Exception:
                     pass
             else:
@@ -659,8 +752,8 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
                 reply_text, reply_buttons = reply, []
 
             if reply_buttons:
-                if is_group:
-                    card_id = await feishu.reply_card(msg.message_id, content=reply_text, loading=False)
+                if _should_use_reply_api(is_group, reply_in_thread):
+                    card_id = await feishu.reply_card(reply_target_msg_id, content=reply_text, loading=False, reply_in_thread=reply_in_thread)
                 else:
                     card_id = await feishu.send_card_to_user(user_id, content=reply_text, loading=False)
                 print(f"[按钮] 卡片已发送 card_id={card_id}, 准备添加 {len(reply_buttons)} 个按钮", flush=True)
@@ -671,8 +764,8 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
                 except Exception as btn_err:
                     print(f"[按钮] 按钮添加失败: {btn_err}", flush=True)
             else:
-                if is_group:
-                    await feishu.reply_card(msg.message_id, content=reply_text, loading=False)
+                if _should_use_reply_api(is_group, reply_in_thread):
+                    await feishu.reply_card(reply_target_msg_id, content=reply_text, loading=False, reply_in_thread=reply_in_thread)
                 else:
                     await feishu.send_card_to_user(user_id, content=reply_text, loading=False)
             return
@@ -684,23 +777,32 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
 
     # 1. 发送"思考中"占位卡片，拿到 message_id
     try:
-        if is_group:
-            card_msg_id = await feishu.reply_card(msg.message_id, loading=True)
+        if _should_use_reply_api(is_group, reply_in_thread):
+            card_msg_id = await feishu.reply_card(reply_target_msg_id, loading=True, reply_in_thread=reply_in_thread)
         else:
             card_msg_id = await feishu.send_card_to_user(user_id, loading=True)
         print(f"[卡片] card_msg_id={card_msg_id}", flush=True)
     except Exception as e:
         print(f"[error] 发送占位卡片失败: {e}", flush=True)
-        if is_group:
+        if _should_use_reply_api(is_group, reply_in_thread):
             try:
-                await feishu.reply_card(msg.message_id, content=f"❌ 发送消息失败：{e}", loading=False)
+                await feishu.reply_card(reply_target_msg_id, content=f"❌ 发送消息失败：{e}", loading=False, reply_in_thread=reply_in_thread)
             except Exception:
                 pass
         else:
             await feishu.send_text_to_user(user_id, f"❌ 发送消息失败：{e}")
         return
 
-    await _run_and_display(user_id, chat_id, is_group, text, card_msg_id, session, msg.message_id)
+    await _run_and_display(
+        user_id,
+        chat_id,
+        is_group,
+        text,
+        card_msg_id,
+        session,
+        reply_target_msg_id,
+        reply_in_thread=reply_in_thread,
+    )
 
 
 def _extract_options(text: str) -> list[tuple[str, str]]:
@@ -776,11 +878,12 @@ def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
     _last_event = time.time()
 
     event = data.event
-    user_id = event.operator.open_id
+    user_id = event.operator.open_id or ""
     value = event.action.value or {}
     action_type = value.get("action", "")
     chat_id = value.get("cid", user_id)
     clicked_msg_id = event.context.open_message_id if event.context else None
+    reply_target_msg_id = value.get("rid") or clicked_msg_id or ""
 
     # 模式切换按钮
     if action_type == "set_mode":
@@ -822,7 +925,7 @@ def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
     reply_text = value.get("reply", "")
     if reply_text:
         print(f"[按钮] user={user_id[:8]}... reply={reply_text}", flush=True)
-        asyncio.run_coroutine_threadsafe(_handle_button_reply(user_id, chat_id, reply_text, clicked_msg_id), _bot_loop)
+        asyncio.run_coroutine_threadsafe(_handle_button_reply(user_id, chat_id, reply_text, reply_target_msg_id), _bot_loop)
 
     resp = P2CardActionTriggerResponse()
     toast = CallBackToast()
@@ -835,6 +938,7 @@ def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
 async def _handle_menu_command(user_id: str, chat_id: str, cmd_text: str, card_msg_id: str):
     """命令菜单按钮点击 → 执行命令并更新卡片"""
     is_group = (chat_id != user_id)
+    reply_in_thread = _chat_key_has_topic(chat_id)
     parsed = parse_command(cmd_text)
     if not parsed:
         return
@@ -842,7 +946,7 @@ async def _handle_menu_command(user_id: str, chat_id: str, cmd_text: str, card_m
 
     # /stop 特殊处理
     if cmd == "stop":
-        reply_text = await _handle_stop_command(user_id)
+        reply_text = await _handle_stop_command(user_id, chat_id)
         if card_msg_id:
             try:
                 await feishu.update_card(card_msg_id, reply_text)
@@ -901,14 +1005,16 @@ async def _handle_set_mode(user_id: str, chat_id: str, mode: str, card_msg_id: s
             pass
 
 
-async def _handle_button_reply(user_id: str, chat_id: str, text: str, clicked_msg_id: str):
+async def _handle_button_reply(user_id: str, chat_id: str, text: str, reply_target_msg_id: str):
     """按钮点击 → 走正常的 lock + Claude 流程"""
     is_group = (chat_id != user_id)
+    reply_in_thread = _chat_key_has_topic(chat_id)
 
     # 自动打断活跃任务
-    active = _active_runs.get_run(user_id)
+    run_key = _run_key(user_id, chat_id)
+    active = _active_runs.get_run(run_key)
     if active and not active.stop_requested:
-        await stop_run(_active_runs, user_id, on_stopped=_announce_interrupted)
+        await stop_run(_active_runs, run_key, on_stopped=_announce_interrupted)
 
     if chat_id not in _chat_locks:
         if len(_chat_locks) >= _MAX_CHAT_LOCKS:
@@ -922,8 +1028,8 @@ async def _handle_button_reply(user_id: str, chat_id: str, text: str, clicked_ms
         try:
             session = await store.get_current(user_id, chat_id)
             try:
-                if is_group and clicked_msg_id:
-                    card_msg_id = await feishu.reply_card(clicked_msg_id, loading=True)
+                if _should_use_reply_api(is_group, reply_in_thread) and reply_target_msg_id:
+                    card_msg_id = await feishu.reply_card(reply_target_msg_id, loading=True, reply_in_thread=reply_in_thread)
                 else:
                     card_msg_id = await feishu.send_card_to_user(user_id, loading=True)
             except Exception as e:
@@ -931,7 +1037,8 @@ async def _handle_button_reply(user_id: str, chat_id: str, text: str, clicked_ms
                 return
             await _run_and_display(
                 user_id, chat_id, is_group, text,
-                card_msg_id, session, clicked_msg_id or "",
+                card_msg_id, session, reply_target_msg_id or "",
+                reply_in_thread=reply_in_thread,
             )
         except Exception as e:
             print(f"[error] 按钮回复处理异常: {type(e).__name__}: {e}", flush=True)
@@ -1015,6 +1122,7 @@ class _CardCallbackHandler(BaseHTTPRequestHandler):
         action_type = value.get("action", "")
         chat_id = value.get("cid", user_id)
         clicked_msg_id = context.get("open_message_id", "")
+        reply_target_msg_id = value.get("rid") or clicked_msg_id
 
         print(f"[HTTP回调] user={user_id[:8]}... action={action_type or 'reply'}", flush=True)
 
@@ -1046,7 +1154,7 @@ class _CardCallbackHandler(BaseHTTPRequestHandler):
             reply_text = value.get("reply", "")
             if reply_text:
                 asyncio.run_coroutine_threadsafe(
-                    _handle_button_reply(user_id, chat_id, reply_text, clicked_msg_id),
+                    _handle_button_reply(user_id, chat_id, reply_text, reply_target_msg_id),
                     _bot_loop,
                 )
             self._respond(200, {"toast": {"type": "info", "content": f"已发送: {reply_text}"}})

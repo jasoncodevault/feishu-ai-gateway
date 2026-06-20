@@ -135,7 +135,31 @@ class MainStopTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(main.feishu, "reply_text", mock.AsyncMock()) as reply_mock:
             await main._send_completion_notice("user-1", is_group=True, notify_msg_id="msg-1")
 
-        reply_mock.assert_awaited_once_with("msg-1", "✅ 已完成")
+        reply_mock.assert_awaited_once_with("msg-1", "✅ 已完成", reply_in_thread=False)
+
+    async def test_completion_notice_topic_reply_sets_thread_flag(self):
+        with mock.patch.object(main.feishu, "reply_text", mock.AsyncMock()) as reply_mock:
+            await main._send_completion_notice(
+                "user-1",
+                is_group=True,
+                notify_msg_id="msg-1",
+                reply_in_thread=True,
+            )
+
+        reply_mock.assert_awaited_once_with("msg-1", "✅ 已完成", reply_in_thread=True)
+
+    async def test_completion_notice_private_topic_uses_reply_api(self):
+        with mock.patch.object(main.feishu, "reply_text", mock.AsyncMock()) as reply_mock, \
+             mock.patch.object(main.feishu, "send_text_to_user", mock.AsyncMock()) as send_mock:
+            await main._send_completion_notice(
+                "user-1",
+                is_group=False,
+                notify_msg_id="msg-1",
+                reply_in_thread=True,
+            )
+
+        reply_mock.assert_awaited_once_with("msg-1", "✅ 已完成", reply_in_thread=True)
+        send_mock.assert_not_awaited()
 
     async def test_should_final_repost_only_when_duration_exceeds_30s_without_options(self):
         self.assertFalse(main._should_final_repost(30.0, has_options=False))
@@ -179,8 +203,53 @@ class MainStopTests(unittest.IsolatedAsyncioTestCase):
             )
 
         recall_mock.assert_awaited_once_with("stream-msg")
-        reply_mock.assert_awaited_once_with("origin-msg", content="最终答案", loading=False)
+        reply_mock.assert_awaited_once_with(
+            "origin-msg",
+            content="最终答案",
+            loading=False,
+            reply_in_thread=False,
+        )
         self.assertEqual(calls, ["recall", "reply"])
+
+    async def test_repost_final_and_recall_topic_reply_sets_thread_flag(self):
+        with mock.patch.object(main.feishu, "reply_card", mock.AsyncMock()) as reply_mock, \
+             mock.patch.object(main.feishu, "recall_message", mock.AsyncMock()):
+            await main._repost_final_and_recall(
+                "user-1",
+                is_group=True,
+                notify_msg_id="origin-msg",
+                card_msg_id="stream-msg",
+                final="最终答案",
+                reply_in_thread=True,
+            )
+
+        reply_mock.assert_awaited_once_with(
+            "origin-msg",
+            content="最终答案",
+            loading=False,
+            reply_in_thread=True,
+        )
+
+    async def test_repost_final_and_recall_private_topic_uses_reply_api(self):
+        with mock.patch.object(main.feishu, "reply_card", mock.AsyncMock()) as reply_mock, \
+             mock.patch.object(main.feishu, "send_card_to_user", mock.AsyncMock()) as send_mock, \
+             mock.patch.object(main.feishu, "recall_message", mock.AsyncMock()):
+            await main._repost_final_and_recall(
+                "user-1",
+                is_group=False,
+                notify_msg_id="origin-msg",
+                card_msg_id="stream-msg",
+                final="最终答案",
+                reply_in_thread=True,
+            )
+
+        reply_mock.assert_awaited_once_with(
+            "origin-msg",
+            content="最终答案",
+            loading=False,
+            reply_in_thread=True,
+        )
+        send_mock.assert_not_awaited()
 
     async def test_repost_final_and_recall_skips_final_card_when_recall_fails(self):
         with mock.patch.object(main.feishu, "send_card_to_user", mock.AsyncMock()) as send_mock, \

@@ -12,7 +12,7 @@ os.environ.setdefault("FEISHU_APP_SECRET", "test_app_secret")
 os.environ.setdefault("FEISHU_VERIFICATION_TOKEN", "test_token")
 os.environ.setdefault("FEISHU_ENCRYPT_KEY", "test_key")
 
-from main import extract_chat_info
+from main import extract_chat_info, _chat_key_has_topic, _message_reply_target_id
 from session_store import SessionStore
 
 
@@ -30,6 +30,8 @@ def test_extract_chat_info_private_chat():
     mock_event.event.sender.sender_id.open_id = "user_123"
     mock_event.event.message.chat_type = "p2p"
     mock_event.event.message.chat_id = "user_123"
+    mock_event.event.message.thread_id = None
+    mock_event.event.message.root_id = None
 
     user_id, chat_id, is_group = extract_chat_info(mock_event)
 
@@ -38,18 +40,100 @@ def test_extract_chat_info_private_chat():
     assert is_group is False
 
 
+def test_extract_chat_info_private_topic_uses_thread_id():
+    """P2P topic/reply threads also need a topic-scoped session key."""
+    mock_event = MagicMock()
+    mock_event.event.sender.sender_id.open_id = "user_123"
+    mock_event.event.message.chat_type = "p2p"
+    mock_event.event.message.chat_id = "oc_p2p_chat"
+    mock_event.event.message.thread_id = "omt_topic_123"
+    mock_event.event.message.root_id = "om_root_ignored"
+
+    user_id, chat_id, is_group = extract_chat_info(mock_event)
+
+    assert user_id == "user_123"
+    assert chat_id == "oc_p2p_chat#topic:omt_topic_123"
+    assert is_group is False
+    assert _chat_key_has_topic(chat_id) is True
+
+
 def test_extract_chat_info_group_chat():
     """Test extracting chat info from group chat message"""
     mock_event = MagicMock()
     mock_event.event.sender.sender_id.open_id = "user_456"
     mock_event.event.message.chat_type = "group"
     mock_event.event.message.chat_id = "group_789"
+    mock_event.event.message.thread_id = None
+    mock_event.event.message.root_id = None
 
     user_id, chat_id, is_group = extract_chat_info(mock_event)
 
     assert user_id == "user_456"
     assert chat_id == "group_789"
     assert is_group is True
+    assert _chat_key_has_topic(chat_id) is False
+
+
+def test_extract_chat_info_topic_group_uses_thread_id():
+    """Topic group messages use thread_id as part of the session key."""
+    mock_event = MagicMock()
+    mock_event.event.sender.sender_id.open_id = "user_456"
+    mock_event.event.message.chat_type = "group"
+    mock_event.event.message.chat_id = "group_789"
+    mock_event.event.message.thread_id = "omt_topic_123"
+    mock_event.event.message.root_id = "om_root_ignored"
+
+    user_id, chat_id, is_group = extract_chat_info(mock_event)
+
+    assert user_id == "user_456"
+    assert chat_id == "group_789#topic:omt_topic_123"
+    assert is_group is True
+    assert _chat_key_has_topic(chat_id) is True
+
+
+def test_extract_chat_info_topic_group_falls_back_to_root_id():
+    """Topic replies without thread_id still isolate on root_id."""
+    mock_event = MagicMock()
+    mock_event.event.sender.sender_id.open_id = "user_456"
+    mock_event.event.message.chat_type = "group"
+    mock_event.event.message.chat_id = "group_789"
+    mock_event.event.message.thread_id = None
+    mock_event.event.message.root_id = "om_root_123"
+
+    user_id, chat_id, is_group = extract_chat_info(mock_event)
+
+    assert user_id == "user_456"
+    assert chat_id == "group_789#topic:om_root_123"
+    assert is_group is True
+    assert _chat_key_has_topic(chat_id) is True
+
+
+def test_topic_reply_target_prefers_parent_then_root_before_child_message():
+    """Replies inside topics should target the root/parent, not child reply."""
+    msg = MagicMock()
+    msg.message_id = "om_child"
+    msg.parent_id = "om_parent"
+    msg.root_id = "om_root"
+
+    assert _message_reply_target_id(msg) == "om_parent"
+
+
+def test_topic_reply_target_falls_back_to_root_id():
+    msg = MagicMock()
+    msg.message_id = "om_child"
+    msg.parent_id = None
+    msg.root_id = "om_root"
+
+    assert _message_reply_target_id(msg) == "om_root"
+
+
+def test_plain_reply_target_uses_message_id():
+    msg = MagicMock()
+    msg.message_id = "om_plain"
+    msg.parent_id = None
+    msg.root_id = None
+
+    assert _message_reply_target_id(msg) == "om_plain"
 
 
 # ── Test session isolation ──────────────────────────────────

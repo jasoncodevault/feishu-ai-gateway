@@ -178,7 +178,13 @@ class FeishuClient:
 
         return await self._retry_with_backoff(_send, max_retries=3)
 
-    async def reply_card(self, message_id: str, content: str = "", loading: bool = True) -> str:
+    async def reply_card(
+        self,
+        message_id: str,
+        content: str = "",
+        loading: bool = True,
+        reply_in_thread: bool = False,
+    ) -> str:
         """回复用户消息（卡片形式），触发通知。返回回复消息的 message_id（带重试）"""
         async def _reply():
             req = (
@@ -188,6 +194,7 @@ class FeishuClient:
                     ReplyMessageRequestBody.builder()
                     .msg_type("interactive")
                     .content(_card_json(content, loading=loading))
+                    .reply_in_thread(reply_in_thread)
                     .build()
                 )
                 .build()
@@ -306,7 +313,7 @@ class FeishuClient:
             raise RuntimeError(f"发送图片失败: {resp.code} {resp.msg}")
         return resp.data.message_id
 
-    async def reply_image(self, message_id: str, path: str) -> str:
+    async def reply_image(self, message_id: str, path: str, reply_in_thread: bool = False) -> str:
         image_key = await self.upload_image(path)
         req = (
             ReplyMessageRequest.builder()
@@ -315,6 +322,7 @@ class FeishuClient:
                 ReplyMessageRequestBody.builder()
                 .msg_type("image")
                 .content(json.dumps({"image_key": image_key}))
+                .reply_in_thread(reply_in_thread)
                 .build()
             )
             .build()
@@ -343,7 +351,13 @@ class FeishuClient:
             raise RuntimeError(f"发送文件失败: {resp.code} {resp.msg}")
         return resp.data.message_id
 
-    async def reply_file(self, message_id: str, path: str, file_name: str | None = None) -> str:
+    async def reply_file(
+        self,
+        message_id: str,
+        path: str,
+        file_name: str | None = None,
+        reply_in_thread: bool = False,
+    ) -> str:
         file_key = await self.upload_file(path, file_name=file_name)
         req = (
             ReplyMessageRequest.builder()
@@ -352,6 +366,7 @@ class FeishuClient:
                 ReplyMessageRequestBody.builder()
                 .msg_type("file")
                 .content(json.dumps({"file_key": file_key}))
+                .reply_in_thread(reply_in_thread)
                 .build()
             )
             .build()
@@ -499,7 +514,7 @@ class FeishuClient:
 
         await self._retry_with_backoff(_update, max_retries=3)
 
-    async def reply_text(self, message_id: str, text: str) -> str:
+    async def reply_text(self, message_id: str, text: str, reply_in_thread: bool = False) -> str:
         """回复纯文本消息（触发通知）"""
         async def _reply():
             req = (
@@ -509,6 +524,7 @@ class FeishuClient:
                     ReplyMessageRequestBody.builder()
                     .msg_type("text")
                     .content(json.dumps({"text": text}))
+                    .reply_in_thread(reply_in_thread)
                     .build()
                 )
                 .build()
