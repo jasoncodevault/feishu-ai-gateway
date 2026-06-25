@@ -40,8 +40,8 @@ def test_extract_chat_info_private_chat():
     assert is_group is False
 
 
-def test_extract_chat_info_private_topic_uses_thread_id():
-    """P2P topic/reply threads also need a topic-scoped session key."""
+def test_extract_chat_info_private_reply_ignores_thread_ids():
+    """P2P replies carry thread/root IDs but must stay on the private session key."""
     mock_event = MagicMock()
     mock_event.event.sender.sender_id.open_id = "user_123"
     mock_event.event.message.chat_type = "p2p"
@@ -52,9 +52,9 @@ def test_extract_chat_info_private_topic_uses_thread_id():
     user_id, chat_id, is_group = extract_chat_info(mock_event)
 
     assert user_id == "user_123"
-    assert chat_id == "oc_p2p_chat#topic:omt_topic_123"
+    assert chat_id == "user_123"
     assert is_group is False
-    assert _chat_key_has_topic(chat_id) is True
+    assert _chat_key_has_topic(chat_id) is False
 
 
 def test_extract_chat_info_group_chat():

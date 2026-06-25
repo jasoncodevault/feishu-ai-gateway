@@ -368,9 +368,11 @@ def extract_chat_info(event: P2ImMessageReceiveV1) -> tuple[str, str, bool]:
         topic_id = _message_topic_id(message)
         chat_id = _topic_chat_key(chat_id_raw, topic_id)
     else:
-        topic_id = _message_topic_id(message)
-        base_chat_id = chat_id_raw or user_id
-        chat_id = _topic_chat_key(base_chat_id, topic_id) if topic_id else user_id
+        # In Feishu DMs, ordinary message replies also carry root_id/parent_id.
+        # Treating those as topic IDs silently forks the user's private Claude
+        # session and can render the bot's answer inside a reply thread that is
+        # easy to miss. Keep all P2P messages on the private session key.
+        chat_id = user_id
 
     return user_id, chat_id, is_group
 
