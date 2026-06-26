@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
@@ -25,17 +26,28 @@ def _make_event(
     text: str = "hello",
     message_id: str = "msg_001",
     mentions: list = None,
+    message_type: str = "text",
 ):
     """构造一个模拟的飞书消息事件"""
     event = MagicMock()
     event.event.sender.sender_id.open_id = user_id
     event.event.message.chat_type = chat_type
     event.event.message.chat_id = chat_id
-    event.event.message.message_type = "text"
+    event.event.message.message_type = message_type
     event.event.message.content = json.dumps({"text": text})
     event.event.message.message_id = message_id
     event.event.message.mentions = mentions
     return event
+
+
+def _message_item(message_id: str, msg_type: str, content: dict, sender: str = "ou_user", create_time: str = "1700000000000"):
+    return SimpleNamespace(
+        message_id=message_id,
+        msg_type=msg_type,
+        create_time=create_time,
+        sender=SimpleNamespace(sender_type="user", id=sender),
+        body=SimpleNamespace(content=json.dumps(content, ensure_ascii=False)),
+    )
 
 
 def _make_claude_output(text: str, session_id: str = "sid_abc123") -> list[bytes]:
@@ -189,6 +201,74 @@ async def test_private_chat_full_flow():
 
     # 验证：session 状态被更新
     mock_store.on_claude_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_merge_forward_is_expanded_before_calling_claude():
+    """合并转发消息应通过 Feishu get-message API 展开后再发给 Claude。"""
+    from main import handle_message_async, _chat_locks
+
+    _chat_locks.clear()
+    event = _make_event(
+        text="Merged and Forwarded Message",
+        message_id="om_merge",
+        message_type="merge_forward",
+    )
+    claude_lines = _make_claude_output("我已读到合并记录")
+    captured_stdin = []
+
+    class CapturingProc(FakeProc):
+        def __init__(self, lines):
+            super().__init__(lines)
+            self.stdin = MagicMock()
+            self.stdin.drain = AsyncMock()
+            self.stdin.close = MagicMock()
+            self.stdin.write = lambda data: captured_stdin.append(data)
+
+    proc = CapturingProc(claude_lines)
+    items = [
+        _message_item("om_merge", "merge_forward", {"text": "Merged and Forwarded Message"}),
+        _message_item("om_child_1", "text", {"text": "昨天拜访 Cohu，确认 MEMS 测量麦需求"}, sender="ou_jason"),
+        _message_item(
+            "om_child_2",
+            "post",
+            {"content": [[{"tag": "text", "text": "Cohu 价值链定位 vs 兆华"}]]},
+            sender="ou_assistant",
+        ),
+        _message_item(
+            "om_child_3",
+            "interactive",
+            {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": "智能纪要：Microphone P..."}]}},
+            sender="ou_minutes_bot",
+        ),
+    ]
+
+    with patch("main.feishu") as mock_feishu, \
+         patch("main.store") as mock_store, \
+         patch("asyncio.create_subprocess_exec", return_value=proc):
+
+        mock_feishu.get_message_items = AsyncMock(return_value=items)
+        mock_feishu.send_card_to_user = AsyncMock(return_value="card_msg_001")
+        mock_feishu.update_card = AsyncMock()
+        mock_feishu.send_text_to_user = AsyncMock()
+
+        mock_session = MagicMock()
+        mock_session.session_id = None
+        mock_session.model = "claude-sonnet-4-6"
+        mock_session.cwd = "/tmp"
+        mock_session.permission_mode = "bypassPermissions"
+        mock_store.get_current = AsyncMock(return_value=mock_session)
+        mock_store.on_claude_response = AsyncMock()
+
+        await handle_message_async(event)
+
+    mock_feishu.get_message_items.assert_awaited_once_with("om_merge")
+    sent_text = b"".join(captured_stdin).decode("utf-8")
+    assert "合并转发聊天记录" in sent_text
+    assert "昨天拜访 Cohu" in sent_text
+    assert "Cohu 价值链定位 vs 兆华" in sent_text
+    assert "智能纪要：Microphone P" in sent_text
+    assert "Merged and Forwarded Message" not in sent_text
 
 
 @pytest.mark.asyncio

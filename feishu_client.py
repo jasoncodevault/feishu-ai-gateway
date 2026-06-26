@@ -16,6 +16,7 @@ from lark_oapi.api.im.v1.model import (
     CreateMessageRequest,
     CreateMessageRequestBody,
     DeleteMessageRequest,
+    GetMessageRequest,
     PatchMessageRequest,
     PatchMessageRequestBody,
     ReplyMessageRequest,
@@ -542,6 +543,23 @@ class FeishuClient:
         resp = await self.client.im.v1.message.adelete(req)
         if not resp.success():
             raise RuntimeError(f"撤回消息失败: {resp.code} {resp.msg}")
+
+    async def get_message_items(self, message_id: str) -> list:
+        """Return message items for a message_id.
+
+        For ``merge_forward`` messages, Feishu's get-message API returns the
+        wrapper message plus its child messages in ``data.items``. Normal
+        messages return a single item.
+        """
+        async def _get():
+            req = GetMessageRequest.builder().message_id(message_id).build()
+            resp = await self.client.im.v1.message.aget(req)
+            if not resp.success():
+                raise RuntimeError(f"获取消息内容失败: {resp.code} {resp.msg}")
+            data = resp.data
+            return list(getattr(data, "items", None) or [])
+
+        return await self._retry_with_backoff(_get, max_retries=2)
 
     async def send_text_to_user(self, open_id: str, text: str) -> str:
         """发送纯文本消息"""

@@ -13,6 +13,7 @@ import os
 import threading
 import time
 import traceback
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # 确保项目目录在 sys.path 最前面
@@ -190,6 +191,189 @@ def _chat_key_has_topic(chat_id: str) -> bool:
 def _should_use_reply_api(is_group: bool, reply_in_thread: bool) -> bool:
     """Use Feishu reply API for groups and for topic/thread replies in p2p chats."""
     return is_group or reply_in_thread
+
+
+def _obj_get(obj, name: str, default=None):
+    """Read SDK objects and dicts with one helper for tests/API responses."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _loads_jsonish(value):
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def _sender_label(sender) -> str:
+    if not sender:
+        return "unknown"
+    sender_type = _obj_get(sender, "sender_type", "") or "sender"
+    sender_id = _obj_get(sender, "id", "") or _obj_get(sender, "open_id", "") or ""
+    return f"{sender_type}:{sender_id}" if sender_id else str(sender_type)
+
+
+def _format_create_time(value) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        ts = int(value)
+        # Feishu message create_time is normally milliseconds.
+        if ts > 10_000_000_000:
+            ts = ts / 1000
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(value)
+
+
+def _extract_rich_text(obj) -> str:
+    """Flatten Feishu post/card-ish JSON into readable text."""
+    parts: list[str] = []
+
+    def walk(node):
+        if node is None:
+            return
+        if isinstance(node, str):
+            s = node.strip()
+            if s:
+                parts.append(s)
+            return
+        if isinstance(node, list):
+            for child in node:
+                walk(child)
+            return
+        if not isinstance(node, dict):
+            return
+
+        tag = node.get("tag", "")
+        if tag == "img":
+            parts.append("[图片]")
+            return
+        if tag in ("media", "video"):
+            parts.append("[媒体]")
+            return
+        if tag == "emotion":
+            parts.append(node.get("emoji_type") or "[表情]")
+            return
+        if tag == "hr":
+            parts.append("---")
+            return
+
+        for key in ("text", "content", "title", "href", "url", "name"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+            elif isinstance(value, (dict, list)):
+                walk(value)
+
+        for key in ("elements", "columns", "body", "header", "i18n_elements"):
+            value = node.get(key)
+            if isinstance(value, (dict, list)):
+                walk(value)
+
+    walk(obj)
+    # Preserve order while suppressing obvious duplicates from card JSON.
+    seen: set[str] = set()
+    compact: list[str] = []
+    for part in parts:
+        if part in seen:
+            continue
+        seen.add(part)
+        compact.append(part)
+    return "\n".join(compact).strip()
+
+
+def _message_body_content(item) -> str:
+    body = _obj_get(item, "body")
+    return _obj_get(body, "content", "") if body is not None else ""
+
+
+def _message_content_text(msg_type: str, content: str) -> tuple[str, dict | None]:
+    data = _loads_jsonish(content)
+    payload = data if isinstance(data, dict) else None
+
+    if msg_type == "text":
+        return (payload.get("text", "") if payload else str(content or "")).strip(), payload
+    if msg_type == "post":
+        return _extract_rich_text(payload if payload is not None else data), payload
+    if msg_type == "interactive":
+        text = _extract_rich_text(payload if payload is not None else data)
+        return (text or "[卡片消息]"), payload
+    if msg_type == "image":
+        key = (payload or {}).get("image_key", "")
+        return f"[图片 image_key={key}]" if key else "[图片]", payload
+    if msg_type == "file":
+        p = payload or {}
+        name = p.get("file_name") or p.get("name") or p.get("fileName") or "文件"
+        key = p.get("file_key") or p.get("fileKey") or ""
+        return f"[文件 {name}{' file_key=' + key if key else ''}]", payload
+    if msg_type in ("audio", "media", "video"):
+        return f"[{msg_type} 消息]", payload
+    if msg_type == "merge_forward":
+        return "[合并转发消息]", payload
+    if isinstance(data, (dict, list)):
+        text = _extract_rich_text(data)
+        return text or json.dumps(data, ensure_ascii=False), payload
+    return str(content or "").strip(), payload
+
+
+async def _format_merged_forward_context(items: list) -> str:
+    """Build Claude prompt text from Feishu get-message items for merge_forward."""
+    child_items = [it for it in (items or []) if _obj_get(it, "msg_type", "") != "merge_forward"]
+    if not child_items:
+        child_items = items or []
+    if not child_items:
+        return "[用户发送了一组合并转发聊天记录，但飞书 API 没有返回可展开的子消息。]"
+
+    lines = [
+        "[用户发送了一组合并转发聊天记录。以下内容已由飞书 API 展开；请把它当作用户提供的上下文来处理。]"
+    ]
+    char_budget = 60_000
+    used = len(lines[0])
+
+    for idx, item in enumerate(child_items, 1):
+        msg_type = _obj_get(item, "msg_type", "unknown") or "unknown"
+        message_id = _obj_get(item, "message_id", "") or ""
+        sender = _sender_label(_obj_get(item, "sender"))
+        created = _format_create_time(_obj_get(item, "create_time", ""))
+        text, payload = _message_content_text(msg_type, _message_body_content(item))
+
+        # Best-effort: if the merged record contains media/file children, download
+        # them so the agent can inspect local paths just like direct uploads.
+        if msg_type == "image" and payload and message_id:
+            image_key = payload.get("image_key", "")
+            if image_key:
+                try:
+                    path = await feishu.download_image(message_id, image_key)
+                    text = f"[图片，已下载到本地路径：{path}。如需分析图片，请读取该路径]"
+                except Exception as exc:
+                    text += f"（下载失败：{exc}）"
+        elif msg_type == "file" and payload and message_id:
+            file_key = payload.get("file_key", "") or payload.get("fileKey", "")
+            file_name = payload.get("file_name", "") or payload.get("name", "") or payload.get("fileName", "")
+            if file_key:
+                try:
+                    path = await feishu.download_file(message_id, file_key, file_name or None)
+                    text = f"[文件：{file_name or os.path.basename(path)}，已下载到本地路径：{path}。请按用户要求读取/转换/处理]"
+                except Exception as exc:
+                    text += f"（下载失败：{exc}）"
+
+        prefix = f"{idx}."
+        meta = " ".join(part for part in [f"[{created}]" if created else "", sender, f"type={msg_type}"] if part)
+        line = f"{prefix} {meta}\n{text or '[空消息]'}"
+        if used + len(line) > char_budget:
+            lines.append(f"...（后续合并转发内容因长度超过 {char_budget} 字符已截断）")
+            break
+        lines.append(line)
+        used += len(line)
+
+    return "\n\n".join(lines)
 
 
 def _run_key(user_id: str, chat_id: str) -> str:
@@ -735,6 +919,23 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
                     pass
             else:
                 await feishu.send_text_to_user(user_id, f"❌ 下载文件失败：{e}")
+            return
+
+    elif msg.message_type == "merge_forward":
+        try:
+            items = await feishu.get_message_items(msg.message_id)
+            text = await _format_merged_forward_context(items)
+            print(f"[merge_forward] expanded items={len(items)} chars={len(text)}", flush=True)
+        except Exception as e:
+            print(f"[error] 展开合并转发消息失败: {e}", flush=True)
+            err = f"❌ 展开合并转发消息失败：{e}"
+            if _should_use_reply_api(is_group, reply_in_thread):
+                try:
+                    await feishu.reply_card(reply_target_msg_id, content=err, loading=False, reply_in_thread=reply_in_thread)
+                except Exception:
+                    pass
+            else:
+                await feishu.send_text_to_user(user_id, err)
             return
 
     else:
