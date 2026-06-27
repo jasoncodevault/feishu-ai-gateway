@@ -347,6 +347,65 @@ async def test_merge_forward_is_expanded_before_calling_claude():
 
 
 @pytest.mark.asyncio
+async def test_p2p_reply_injects_replied_message_context():
+    """私聊回复旧消息时，应把被回复消息正文注入 Claude prompt，但不 fork session。"""
+    from main import handle_message_async, _chat_locks
+
+    _chat_locks.clear()
+    event = _make_event(text="发飞书文档给我", message_id="om_current")
+    event.event.message.parent_id = "om_parent"
+    event.event.message.root_id = "om_parent"
+    claude_lines = _make_claude_output("已根据被回复消息发文档")
+    captured_stdin = []
+
+    class CapturingProc(FakeProc):
+        def __init__(self, lines):
+            super().__init__(lines)
+            self.stdin = MagicMock()
+            self.stdin.drain = AsyncMock()
+            self.stdin.close = MagicMock()
+            self.stdin.write = lambda data: captured_stdin.append(data)
+
+    proc = CapturingProc(claude_lines)
+    replied_items = [
+        _message_item(
+            "om_parent",
+            "interactive",
+            {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": "中国军工科研院所名称体系调查 定稿"}]}},
+            sender="ou_jingzhe",
+        )
+    ]
+
+    with patch("main.feishu") as mock_feishu, \
+         patch("main.store") as mock_store, \
+         patch("asyncio.create_subprocess_exec", return_value=proc):
+
+        mock_feishu.get_message_items = AsyncMock(return_value=replied_items)
+        mock_feishu.send_card_to_user = AsyncMock(return_value="card_msg_001")
+        mock_feishu.update_card = AsyncMock()
+        mock_feishu.send_text_to_user = AsyncMock()
+
+        mock_session = MagicMock()
+        mock_session.session_id = "existing_sid"
+        mock_session.model = "claude-sonnet-4-6"
+        mock_session.cwd = "/tmp"
+        mock_session.permission_mode = "bypassPermissions"
+        mock_store.get_current = AsyncMock(return_value=mock_session)
+        mock_store.on_claude_response = AsyncMock()
+
+        await handle_message_async(event)
+
+    mock_feishu.get_message_items.assert_awaited_once_with("om_parent")
+    # p2p replies stay in the private chat and should not be sent with reply_card/thread scoping.
+    mock_feishu.send_card_to_user.assert_awaited_once()
+    sent_text = b"".join(captured_stdin).decode("utf-8")
+    assert "通过飞书「回复」某条历史消息" in sent_text
+    assert "中国军工科研院所名称体系调查 定稿" in sent_text
+    assert "[用户当前回复内容]" in sent_text
+    assert "发飞书文档给我" in sent_text
+
+
+@pytest.mark.asyncio
 async def test_private_chat_streaming_updates_card():
     """验证流式文本确实会增量更新卡片"""
     from main import handle_message_async, _chat_locks

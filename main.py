@@ -331,6 +331,21 @@ def _message_reply_target_id(msg) -> str:
     return ""
 
 
+def _message_reply_context_id(msg) -> str:
+    """Return the message id the user explicitly replied to, if any.
+
+    Feishu p2p replies carry parent_id/root_id, but we intentionally do not
+    scope private sessions by those ids. The model still needs the replied
+    message content as local context for prompts like "补一下" or "发这个".
+    """
+    current = getattr(msg, "message_id", "") or ""
+    for attr in ("parent_id", "root_id"):
+        value = getattr(msg, attr, None)
+        if isinstance(value, str) and value and value != current:
+            return value
+    return ""
+
+
 def _topic_chat_key(chat_id: str, topic_id: str) -> str:
     """Session/lock key for a Feishu chat, scoped to topic when available."""
     return f"{chat_id}{_TOPIC_CHAT_DELIM}{topic_id}" if topic_id else chat_id
@@ -526,6 +541,67 @@ async def _format_merged_forward_context(items: list) -> str:
         used += len(line)
 
     return "\n\n".join(lines)
+
+
+async def _format_replied_message_context(items: list, reply_message_id: str) -> str:
+    """Build Claude prompt text for the Feishu message being replied to."""
+    if not items:
+        return f"[用户正在回复飞书消息 {reply_message_id}，但飞书 API 没有返回该消息正文。]"
+
+    lines = [
+        "[用户这条消息是通过飞书「回复」某条历史消息发来的。以下是被回复消息内容；请把它作为本轮请求的直接上下文。]"
+    ]
+    char_budget = 20_000
+    used = len(lines[0])
+
+    for idx, item in enumerate(items, 1):
+        msg_type = _obj_get(item, "msg_type", "unknown") or "unknown"
+        message_id = _obj_get(item, "message_id", "") or reply_message_id
+        sender = _sender_label(_obj_get(item, "sender"))
+        created = _format_create_time(_obj_get(item, "create_time", ""))
+        text, payload = _message_content_text(msg_type, _message_body_content(item))
+
+        if msg_type == "image" and payload and message_id:
+            image_key = payload.get("image_key", "")
+            if image_key:
+                try:
+                    path = await feishu.download_image(message_id, image_key)
+                    text = f"[被回复的是图片，已下载到本地路径：{path}。如需分析图片，请读取该路径]"
+                except Exception as exc:
+                    text += f"（下载失败：{exc}）"
+        elif msg_type == "file" and payload and message_id:
+            file_key = payload.get("file_key", "") or payload.get("fileKey", "")
+            file_name = payload.get("file_name", "") or payload.get("name", "") or payload.get("fileName", "")
+            if file_key:
+                try:
+                    path = await feishu.download_file(message_id, file_key, file_name or None)
+                    text = f"[被回复的是文件：{file_name or os.path.basename(path)}，已下载到本地路径：{path}。请按用户要求读取/转换/处理]"
+                except Exception as exc:
+                    text += f"（下载失败：{exc}）"
+
+        meta = " ".join(part for part in [f"[{created}]" if created else "", sender, f"type={msg_type}", f"id={message_id}" if message_id else ""] if part)
+        line = f"{idx}. {meta}\n{text or '[空消息]'}"
+        if used + len(line) > char_budget:
+            lines.append(f"...（被回复消息内容因长度超过 {char_budget} 字符已截断）")
+            break
+        lines.append(line)
+        used += len(line)
+
+    return "\n\n".join(lines)
+
+
+async def _fetch_replied_message_context(msg) -> str:
+    reply_message_id = _message_reply_context_id(msg)
+    if not reply_message_id:
+        return ""
+    try:
+        items = await feishu.get_message_items(reply_message_id)
+        context = await _format_replied_message_context(items, reply_message_id)
+        print(f"[reply_context] fetched id={reply_message_id} items={len(items)} chars={len(context)}", flush=True)
+        return context
+    except Exception as exc:
+        print(f"[warn] 获取被回复消息失败 id={reply_message_id}: {exc}", flush=True)
+        return f"[用户正在回复飞书消息 {reply_message_id}，但网关获取该消息正文失败：{exc}]"
 
 
 def _run_key(user_id: str, chat_id: str) -> str:
@@ -1133,6 +1209,12 @@ async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
                     await feishu.send_card_to_user(user_id, content=reply_text, loading=False)
             return
         # reply is None → 不是 bot 命令，当作普通消息（含 /xxx）转发给 Claude
+
+    # 飞书“回复某条消息”时，显式把被回复消息正文注入本轮 prompt。
+    # 注意：这不能放在斜杠命令解析之前，否则会破坏 /help、/model 等命令。
+    reply_context = await _fetch_replied_message_context(msg)
+    if reply_context:
+        text = f"{reply_context}\n\n[用户当前回复内容]\n{text}"
 
     # ── 普通消息 → 调用 Claude ──────────────────────────────
     session = await store.get_current(user_id, chat_id)
