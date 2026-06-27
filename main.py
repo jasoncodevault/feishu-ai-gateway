@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import base64
 import json
 import re
 import sys
@@ -13,6 +14,8 @@ import os
 import threading
 import time
 import traceback
+import tempfile
+import uuid
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -119,10 +122,15 @@ async def _send_local_media_refs(
     is_group: bool,
     notify_msg_id: str,
     text: str,
+    extra_paths: list[str] | None = None,
     reply_in_thread: bool = False,
 ) -> None:
     """Upload and send local media files referenced in the final answer."""
     refs = _iter_local_media_refs(text)
+    if extra_paths:
+        refs.extend(extra_paths)
+    seen: set[str] = set()
+    refs = [p for p in refs if not (p in seen or seen.add(p))]
     if not refs:
         return
     for path in refs:
@@ -141,6 +149,150 @@ async def _send_local_media_refs(
             print(f"[media] sent local file: {path}", flush=True)
         except Exception as exc:
             print(f"[warn] 发送本地媒体失败 path={path}: {exc}", flush=True)
+
+
+def _claude_project_slug(cwd: str | None) -> str:
+    """Return Claude Code's project directory slug for an absolute cwd."""
+    path = os.path.abspath(os.path.expanduser(cwd or os.getcwd()))
+    return path.replace(os.sep, "-")
+
+
+def _claude_transcript_path(cwd: str | None, session_id: str | None) -> str | None:
+    if not session_id:
+        return None
+    return os.path.join(
+        os.path.expanduser("~"),
+        ".claude",
+        "projects",
+        _claude_project_slug(cwd),
+        f"{session_id}.jsonl",
+    )
+
+
+def _count_file_lines(path: str | None) -> int:
+    if not path or not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, "rb") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
+def _media_ext_from_type(media_type: str | None) -> str:
+    mt = (media_type or "").lower()
+    if "jpeg" in mt or "jpg" in mt:
+        return ".jpg"
+    if "gif" in mt:
+        return ".gif"
+    if "webp" in mt:
+        return ".webp"
+    if "bmp" in mt:
+        return ".bmp"
+    return ".png"
+
+
+def _write_base64_media(data: str, media_type: str | None) -> str | None:
+    if not data:
+        return None
+    try:
+        raw = base64.b64decode(data, validate=False)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    path = os.path.join(
+        tempfile.gettempdir(),
+        f"claude-attachment-{uuid.uuid4().hex[:10]}{_media_ext_from_type(media_type)}",
+    )
+    try:
+        with open(path, "wb") as f:
+            f.write(raw)
+        return path
+    except Exception:
+        return None
+
+
+def _extract_local_paths_from_text(text: str) -> list[str]:
+    """Extract existing local image paths from tool-result text.
+
+    Keep this intentionally narrow. Arbitrarily uploading every local file path
+    mentioned by a tool result would leak unrelated working files; this path is
+    for side-channel images such as generated QR codes.
+    """
+    if not text:
+        return []
+    paths: list[str] = []
+    for raw in re.findall(r"(?<![\w.-])(/[^\s'\"`<>]+)", text):
+        candidate = raw.rstrip(".,;:，。；：)）]}")
+        if os.path.splitext(candidate)[1].lower() in _IMAGE_EXTS and os.path.isfile(candidate):
+            paths.append(candidate)
+    return paths
+
+
+def _iter_tool_result_media(obj) -> list[str]:
+    """Extract local media refs from Claude Code transcript rows.
+
+    Claude Code can show images in its own UI via tool-result attachments even
+    when the final assistant text only says "see the QR above". Feishu cannot see
+    those side-channel attachments unless we lift them out of the transcript.
+    """
+    refs: list[str] = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            if value.get("type") == "image":
+                source = value.get("source") or {}
+                if isinstance(source, dict) and source.get("type") == "base64":
+                    path = _write_base64_media(source.get("data", ""), source.get("media_type"))
+                    if path:
+                        refs.append(path)
+                file_obj = value.get("file") or {}
+                if isinstance(file_obj, dict) and file_obj.get("base64"):
+                    path = _write_base64_media(file_obj.get("base64", ""), file_obj.get("media_type"))
+                    if path:
+                        refs.append(path)
+            for v in value.values():
+                walk(v)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, str):
+            refs.extend(_extract_local_paths_from_text(value))
+
+    walk(obj)
+    seen: set[str] = set()
+    return [p for p in refs if not (p in seen or seen.add(p))]
+
+
+def _extract_recent_claude_media_refs(
+    cwd: str | None,
+    session_id: str | None,
+    *,
+    after_line: int = 0,
+) -> list[str]:
+    """Return media/file paths produced in the latest Claude Code turn."""
+    path = _claude_transcript_path(cwd, session_id)
+    if not path or not os.path.isfile(path):
+        return []
+
+    refs: list[str] = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line_no, line in enumerate(f, 1):
+                if line_no <= after_line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                refs.extend(_iter_tool_result_media(obj))
+    except Exception as exc:
+        print(f"[warn] 读取 Claude 附件记录失败: {exc}", flush=True)
+        return []
+
+    seen: set[str] = set()
+    return [p for p in refs if os.path.isfile(p) and not (p in seen or seen.add(p))]
 
 
 def _iter_mentions(msg) -> list:
@@ -736,6 +888,8 @@ async def _run_and_display(
             last_push_len = len(accumulated)
 
     claude_msg = text
+    transcript_before_path = _claude_transcript_path(session.cwd, session.session_id)
+    transcript_before_lines = _count_file_lines(transcript_before_path)
 
     def on_process_start(proc):
         _active_runs.attach_process(run_key, proc)
@@ -778,6 +932,11 @@ async def _run_and_display(
     # 最终更新卡片，检测选项时附加按钮
     # AskUserQuestion 的内容在 accumulated 里，full_text 可能不含，需要兜底
     final = full_text or accumulated or "（无输出）"
+    transcript_media_refs = _extract_recent_claude_media_refs(
+        session.cwd,
+        new_session_id or session.session_id,
+        after_line=transcript_before_lines if (new_session_id or session.session_id) == session.session_id else 0,
+    )
     if used_fresh_session_fallback:
         final = (
             "⚠️ 检测到工作目录已变化，旧会话无法继续。"
@@ -831,6 +990,7 @@ async def _run_and_display(
         is_group=is_group,
         notify_msg_id=notify_msg_id,
         text=final,
+        extra_paths=transcript_media_refs,
         reply_in_thread=reply_in_thread,
     )
 

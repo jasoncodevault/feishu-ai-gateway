@@ -3,6 +3,7 @@
 Mock 掉飞书 API 和 Claude CLI，验证从收到消息到发送回复的完整链路。
 """
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -72,6 +73,80 @@ def _make_claude_output(text: str, session_id: str = "sid_abc123") -> list[bytes
         "result": text,
     }).encode() + b"\n")
     return lines
+
+
+def test_recent_claude_media_refs_extracts_qr_paths(tmp_path, monkeypatch):
+    """Claude Code side-channel image/tool-result paths should be forwarded to Feishu."""
+    import main
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cwd = "/tmp/jingzhe-test"
+    session_id = "sid_qr"
+    transcript_dir = home / ".claude" / "projects" / "-tmp-jingzhe-test"
+    transcript_dir.mkdir(parents=True)
+
+    qr = tmp_path / "mail_auth_qr.png"
+    qr.write_bytes(b"png-bytes")
+    md = tmp_path / "notes.md"
+    md.write_text("do not upload arbitrary notes", encoding="utf-8")
+
+    transcript = transcript_dir / f"{session_id}.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({"type": "user", "message": {"content": "old turn /tmp/old.png"}}),
+            json.dumps({
+                "type": "user",
+                "message": {"content": [{"type": "tool_result", "content": f"QR 已生成 {qr} and notes {md}"}]},
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    refs = main._extract_recent_claude_media_refs(cwd, session_id, after_line=1)
+
+    assert str(qr) in refs
+    assert str(md) not in refs
+
+
+def test_recent_claude_media_refs_materializes_base64_images(tmp_path, monkeypatch):
+    """Base64 image tool results in Claude transcript should become temp files."""
+    import main
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cwd = "/tmp/jingzhe-test"
+    session_id = "sid_img"
+    transcript_dir = home / ".claude" / "projects" / "-tmp-jingzhe-test"
+    transcript_dir.mkdir(parents=True)
+
+    raw = b"\x89PNG\r\n\x1a\nqr"
+    transcript = transcript_dir / f"{session_id}.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "content": [{
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "data": base64.b64encode(raw).decode(),
+                        "media_type": "image/png",
+                    },
+                }],
+            }]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    refs = main._extract_recent_claude_media_refs(cwd, session_id, after_line=0)
+
+    assert len(refs) == 1
+    assert refs[0].endswith(".png")
+    assert os.path.isfile(refs[0])
+    with open(refs[0], "rb") as f:
+        assert f.read() == raw
 
 
 def _make_tool_use_output(
