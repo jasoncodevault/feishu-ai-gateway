@@ -406,6 +406,58 @@ async def test_p2p_reply_injects_replied_message_context():
 
 
 @pytest.mark.asyncio
+async def test_p2p_reply_prefers_cached_bot_card_context(tmp_path, monkeypatch):
+    """回复机器人卡片时，优先使用网关缓存，避免飞书 API 返回“请升级客户端”。"""
+    from main import handle_message_async, _chat_locks
+    import main
+
+    monkeypatch.setattr(main, "_MESSAGE_CACHE_FILE", str(tmp_path / "message_cache.json"))
+    main._cache_message_content("om_cached_card", "真实最终回复：飞书文档链接 https://crysound.feishu.cn/docx/abc", kind="final_card")
+
+    _chat_locks.clear()
+    event = _make_event(text="发飞书文档给我", message_id="om_current")
+    event.event.message.parent_id = "om_cached_card"
+    event.event.message.root_id = "om_cached_card"
+    claude_lines = _make_claude_output("已根据缓存上下文处理")
+    captured_stdin = []
+
+    class CapturingProc(FakeProc):
+        def __init__(self, lines):
+            super().__init__(lines)
+            self.stdin = MagicMock()
+            self.stdin.drain = AsyncMock()
+            self.stdin.close = MagicMock()
+            self.stdin.write = lambda data: captured_stdin.append(data)
+
+    proc = CapturingProc(claude_lines)
+
+    with patch("main.feishu") as mock_feishu, \
+         patch("main.store") as mock_store, \
+         patch("asyncio.create_subprocess_exec", return_value=proc):
+
+        mock_feishu.get_message_items = AsyncMock(return_value=[])
+        mock_feishu.send_card_to_user = AsyncMock(return_value="card_msg_001")
+        mock_feishu.update_card = AsyncMock()
+        mock_feishu.send_text_to_user = AsyncMock()
+
+        mock_session = MagicMock()
+        mock_session.session_id = "existing_sid"
+        mock_session.model = "claude-sonnet-4-6"
+        mock_session.cwd = "/tmp"
+        mock_session.permission_mode = "bypassPermissions"
+        mock_store.get_current = AsyncMock(return_value=mock_session)
+        mock_store.on_claude_response = AsyncMock()
+
+        await handle_message_async(event)
+
+    mock_feishu.get_message_items.assert_not_awaited()
+    sent_text = b"".join(captured_stdin).decode("utf-8")
+    assert "cached_bot_message" in sent_text
+    assert "真实最终回复：飞书文档链接" in sent_text
+    assert "发飞书文档给我" in sent_text
+
+
+@pytest.mark.asyncio
 async def test_private_chat_streaming_updates_card():
     """验证流式文本确实会增量更新卡片"""
     from main import handle_message_async, _chat_locks

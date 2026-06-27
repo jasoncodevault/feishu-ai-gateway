@@ -87,6 +87,52 @@ _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _MARKDOWN_MEDIA_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 _MEDIA_TOKEN_RE = re.compile(r"MEDIA:(/[^\s)]+)")
 _TOPIC_CHAT_DELIM = "#topic:"
+_MESSAGE_CACHE_FILE = os.path.join(config.SESSIONS_DIR, "message_cache.json")
+_MESSAGE_CACHE_MAX = 1000
+
+
+def _load_message_cache() -> dict:
+    try:
+        with open(_MESSAGE_CACHE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_message_cache(cache: dict) -> None:
+    try:
+        os.makedirs(config.SESSIONS_DIR, exist_ok=True)
+        items = sorted(
+            cache.items(),
+            key=lambda kv: (kv[1] or {}).get("ts", 0) if isinstance(kv[1], dict) else 0,
+            reverse=True,
+        )[:_MESSAGE_CACHE_MAX]
+        with open(_MESSAGE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(dict(items), f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"[warn] 保存消息缓存失败: {exc}", flush=True)
+
+
+def _cache_message_content(message_id: str, content: str, *, kind: str = "card") -> None:
+    if not isinstance(message_id, str) or not isinstance(content, str):
+        return
+    message_id = message_id.strip()
+    content = content.strip()
+    if not message_id or not content:
+        return
+    cache = _load_message_cache()
+    cache[message_id] = {"ts": time.time(), "kind": kind, "content": content}
+    _save_message_cache(cache)
+
+
+def _get_cached_message_content(message_id: str) -> str:
+    entry = _load_message_cache().get((message_id or "").strip())
+    if isinstance(entry, dict):
+        return str(entry.get("content") or "").strip()
+    if isinstance(entry, str):
+        return entry.strip()
+    return ""
 
 
 def _clean_local_path_ref(ref: str) -> str:
@@ -594,6 +640,14 @@ async def _fetch_replied_message_context(msg) -> str:
     reply_message_id = _message_reply_context_id(msg)
     if not reply_message_id:
         return ""
+    cached = _get_cached_message_content(reply_message_id)
+    if cached:
+        print(f"[reply_context] cache hit id={reply_message_id} chars={len(cached)}", flush=True)
+        return (
+            "[用户这条消息是通过飞书「回复」机器人之前发出的消息来的。"
+            "以下内容来自网关本地缓存，比飞书 API 返回的卡片降级文本更可靠；请把它作为本轮请求的直接上下文。]"
+            f"\n\n1. type=cached_bot_message id={reply_message_id}\n{cached}"
+        )
     try:
         items = await feishu.get_message_items(reply_message_id)
         context = await _format_replied_message_context(items, reply_message_id)
@@ -683,9 +737,10 @@ async def _repost_final_and_recall(
 
     try:
         if _should_use_reply_api(is_group, reply_in_thread) and notify_msg_id:
-            await feishu.reply_card(notify_msg_id, content=final, loading=False, reply_in_thread=reply_in_thread)
+            repost_id = await feishu.reply_card(notify_msg_id, content=final, loading=False, reply_in_thread=reply_in_thread)
         else:
-            await feishu.send_card_to_user(user_id, content=final, loading=False)
+            repost_id = await feishu.send_card_to_user(user_id, content=final, loading=False)
+        _cache_message_content(repost_id, final, kind="final_repost_card")
     except Exception as exc:
         print(f"[warn] final repost failed after recall: {exc}", flush=True)
     return True
@@ -1031,6 +1086,7 @@ async def _run_and_display(
             await feishu.update_card_with_buttons(card_msg_id, final, buttons, flow=short)
         else:
             await feishu.update_card(card_msg_id, final)
+        _cache_message_content(card_msg_id, final, kind="final_card")
         card_patched = True
     except Exception as e:
         print(f"[error] 卡片更新失败，回退发文本: {e}", flush=True)
