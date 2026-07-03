@@ -35,21 +35,20 @@ MODE_ALIASES = {
 }
 
 VALID_EFFORTS = {
-    "low": "低：更快，适合简单问答",
-    "medium": "中：平衡速度和推理",
-    "high": "高：复杂分析/代码任务",
-    "xhigh": "超高：更深推理",
-    "max": "最高：最深推理，最慢也最贵",
-    "auto": "自动：由 Claude Code 判断",
+    "low": "Most efficient. Significant token savings with some capability reduction.",
+    "medium": "Balanced approach with moderate token savings.",
+    "high": "High capability. Equivalent to not setting the parameter.",
+    "xhigh": "Extended capability for long-horizon work; availability is model-dependent.",
+    "max": "Absolute maximum capability with no constraints on token spending; availability is model-dependent.",
 }
 
 CODEX_VALID_EFFORTS = {
-    "minimal": "最小：最快，适合简单确认",
-    "low": "低：更快，适合简单问答",
-    "medium": "中：平衡速度和推理",
-    "high": "高：复杂分析/代码任务",
-    "xhigh": "超高：最深推理（模型支持时可用）",
-    "auto": "自动：使用 Codex 默认推理深度",
+    "none": "OpenAI reasoning effort `none`; availability is model-dependent.",
+    "minimal": "OpenAI reasoning effort `minimal`; availability is model-dependent.",
+    "low": "OpenAI reasoning effort `low`; lower effort favors speed and lower token usage.",
+    "medium": "OpenAI reasoning effort `medium`; balanced default-style tradeoff.",
+    "high": "OpenAI reasoning effort `high`; higher effort thinks more completely.",
+    "xhigh": "OpenAI reasoning effort `xhigh`; availability is model-dependent.",
 }
 
 EFFORT_ALIASES = {
@@ -111,7 +110,7 @@ HELP_TEXT = """\
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换模型（fable / opus / sonnet / haiku 或完整 ID）
 `/fast` — 查看 Fast 状态；`/fast on|off` 开关 Claude Code 原生 Fast 模式（适用于当前模型，成本更高）
-`/effort [级别]` — 切换思考深度（low / medium / high / xhigh / max / auto）
+`/effort [级别]` — 切换 Claude effort level（low / medium / high / xhigh / max）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
 `/cd [路径]` — 切换工具执行的工作目录
@@ -142,9 +141,9 @@ CODEX_HELP_TEXT = """\
 `/new` 或 `/clear` — 开始新 session
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换 Codex 模型（默认 `gpt-5.5`，也可填完整 ID）
-`/think` — 切到高推理深度（等同 `/effort high`）
+`/think` — 设置 Codex `model_reasoning_effort=high`（等同 `/effort high`）
 `/fast` — 查看 Fast 状态；`/fast on|off` 开关 Codex 原生 Fast 模式（约 1.5× 速度，GPT-5.5 约 2.5× credit rate）
-`/effort [级别]` — 切换推理深度（minimal / low / medium / high / xhigh / auto）
+`/effort [级别]` — 设置 Codex `model_reasoning_effort`（none / minimal / low / medium / high / xhigh，取值依模型而定）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
 `/cd [路径]` — 切换工具执行的工作目录
@@ -931,7 +930,7 @@ async def handle_command(
         await store.set_model(user_id, chat_id, model)
         if default_effort:
             await store.set_effort(user_id, chat_id, default_effort)
-            return f"✅ 已切换 Claude 模型为 `{model}`\n思考深度：**{default_effort}**"
+            return f"✅ 已切换 Claude 模型为 `{model}`\nEffort：**{default_effort}**"
         return f"✅ 已切换 Claude 模型为 `{model}`"
 
     elif cmd == "fast":
@@ -970,44 +969,53 @@ async def handle_command(
                 args = "high"
             if not args:
                 cur = await store.get_current(user_id, chat_id)
+                desc = CODEX_VALID_EFFORTS.get(
+                    cur.effort,
+                    "未显式设置 `model_reasoning_effort`；Codex/model 使用自己的默认值。",
+                )
                 return {
-                    "text": f"当前 Codex 推理深度：**{cur.effort}**\n{CODEX_VALID_EFFORTS.get(cur.effort, '')}",
+                    "text": f"当前 Codex `model_reasoning_effort`：**{cur.effort}**\n{desc}",
                     "buttons": [
+                        {"text": "⭕ None", "value": {"action": "run_cmd", "cmd": "/effort none", "cid": chat_id}},
                         {"text": "🪶 Minimal", "value": {"action": "run_cmd", "cmd": "/effort minimal", "cid": chat_id}},
                         {"text": "⚡ Low", "value": {"action": "run_cmd", "cmd": "/effort low", "cid": chat_id}},
                         {"text": "⚖️ Medium", "value": {"action": "run_cmd", "cmd": "/effort medium", "cid": chat_id}},
                         {"text": "🧠 High", "value": {"action": "run_cmd", "cmd": "/effort high", "cid": chat_id}},
                         {"text": "🔥 XHigh", "value": {"action": "run_cmd", "cmd": "/effort xhigh", "cid": chat_id}},
-                        {"text": "🤖 Auto", "value": {"action": "run_cmd", "cmd": "/effort auto", "cid": chat_id}},
                     ],
                 }
             normalized = "".join(args.lower().split())
             effort = CODEX_EFFORT_ALIASES.get(normalized, args.lower().strip())
             if effort not in CODEX_VALID_EFFORTS:
-                return f"❌ 未知 Codex 推理深度：`{args}`\n可选：{', '.join(f'`{m}`' for m in CODEX_VALID_EFFORTS)}"
+                return f"❌ 未知 Codex `model_reasoning_effort`：`{args}`\n可选：{', '.join(f'`{m}`' for m in CODEX_VALID_EFFORTS)}"
             await store.set_effort(user_id, chat_id, effort)
-            return f"✅ 已切换 Codex 推理深度为 **{effort}** — {CODEX_VALID_EFFORTS[effort]}"
+            return f"✅ 已设置 Codex `model_reasoning_effort` 为 **{effort}** — {CODEX_VALID_EFFORTS[effort]}"
 
         if cmd == "think" and not args:
-            args = "medium"
+            args = "high"
         if not args:
             cur = await store.get_current(user_id, chat_id)
+            desc = VALID_EFFORTS.get(
+                cur.effort,
+                "未显式设置 effort；Claude 官方默认行为等同 `high`。",
+            )
+            display_effort = cur.effort if cur.effort in VALID_EFFORTS else "high（未显式设置）"
             return {
-                "text": f"当前思考深度：**{cur.effort}**\n{VALID_EFFORTS.get(cur.effort, '')}",
+                "text": f"当前 Claude effort level：**{display_effort}**\n{desc}",
                 "buttons": [
                     {"text": "⚡ Low", "value": {"action": "run_cmd", "cmd": "/effort low", "cid": chat_id}},
                     {"text": "⚖️ Medium", "value": {"action": "run_cmd", "cmd": "/effort medium", "cid": chat_id}},
                     {"text": "🧠 High", "value": {"action": "run_cmd", "cmd": "/effort high", "cid": chat_id}},
+                    {"text": "🔥 XHigh", "value": {"action": "run_cmd", "cmd": "/effort xhigh", "cid": chat_id}},
                     {"text": "🔥 Max", "value": {"action": "run_cmd", "cmd": "/effort max", "cid": chat_id}},
-                    {"text": "🤖 Auto", "value": {"action": "run_cmd", "cmd": "/effort auto", "cid": chat_id}},
                 ],
             }
         normalized = "".join(args.lower().split())
         effort = EFFORT_ALIASES.get(normalized, args.lower().strip())
         if effort not in VALID_EFFORTS:
-            return f"❌ 未知思考深度：`{args}`\n可选：{', '.join(f'`{m}`' for m in VALID_EFFORTS)}"
+            return f"❌ 未知 Claude effort level：`{args}`\n可选：{', '.join(f'`{m}`' for m in VALID_EFFORTS)}"
         await store.set_effort(user_id, chat_id, effort)
-        return f"✅ 已切换思考深度为 **{effort}** — {VALID_EFFORTS[effort]}"
+        return f"✅ 已设置 Claude effort level 为 **{effort}** — {VALID_EFFORTS[effort]}"
 
     elif cmd == "status":
         cur = await store.get_current_raw(user_id, chat_id)
@@ -1023,7 +1031,7 @@ async def handle_command(
             f"📊 **当前 Session 状态**\n"
             f"Session ID: `{sid}`\n"
             f"模型: `{model}`\n"
-            f"思考深度: `{effort}`\n"
+            f"Effort: `{effort}`\n"
             f"{'Codex' if AGENT_BACKEND == 'codex' else 'Claude'} Fast: `{service_tier}`\n"
             f"权限模式: `{mode}`\n"
             f"工作空间: `{workspace}`\n"

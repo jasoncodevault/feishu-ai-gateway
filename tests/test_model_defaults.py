@@ -227,6 +227,18 @@ async def test_codex_think_defaults_to_high_effort(monkeypatch):
     assert "high" in reply
 
 
+@pytest.mark.asyncio
+async def test_claude_think_defaults_to_high_effort(monkeypatch):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "claude", raising=False)
+    store = FakeStore()
+
+    reply = await handle_command("think", "", "user_1", "chat_1", store)
+
+    assert isinstance(reply, str)
+    assert store.effort_calls == [("user_1", "chat_1", "high")]
+    assert "Claude effort level" in reply
+
+
 def test_fast_is_bot_command_not_forwarded():
     assert "fast" in commands.BOT_COMMANDS
 
@@ -242,7 +254,8 @@ async def test_codex_effort_menu_and_aliases_are_codex_safe(monkeypatch):
     reply = await handle_command("effort", "", "user_1", "chat_1", StoreWithCurrent())
     labels = [btn["text"] for btn in reply["buttons"]]
 
-    assert labels == ["🪶 Minimal", "⚡ Low", "⚖️ Medium", "🧠 High", "🔥 XHigh", "🤖 Auto"]
+    assert labels == ["⭕ None", "🪶 Minimal", "⚡ Low", "⚖️ Medium", "🧠 High", "🔥 XHigh"]
+    assert "model_reasoning_effort" in reply["text"]
 
     store = FakeStore()
     alias_reply = await handle_command("effort", "max", "user_1", "chat_1", store)
@@ -253,6 +266,22 @@ async def test_codex_effort_menu_and_aliases_are_codex_safe(monkeypatch):
     xhigh_reply = await handle_command("effort", "xhigh", "user_1", "chat_1", store)
     assert store.effort_calls == [("user_1", "chat_1", "xhigh")]
     assert "xhigh" in xhigh_reply
+
+
+@pytest.mark.asyncio
+async def test_claude_effort_menu_uses_official_effort_levels(monkeypatch):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "claude", raising=False)
+
+    class StoreWithCurrent(FakeStore):
+        async def get_current(self, user_id, chat_id):
+            return type("Session", (), {"effort": "high"})()
+
+    reply = await handle_command("effort", "", "user_1", "chat_1", StoreWithCurrent())
+    labels = [btn["text"] for btn in reply["buttons"]]
+
+    assert labels == ["⚡ Low", "⚖️ Medium", "🧠 High", "🔥 XHigh", "🔥 Max"]
+    assert "Claude effort level" in reply["text"]
+    assert "Equivalent to not setting the parameter" in reply["text"]
 
 
 def test_codex_usage_is_not_claude_oauth(monkeypatch):
