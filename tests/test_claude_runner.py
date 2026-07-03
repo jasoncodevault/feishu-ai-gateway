@@ -328,6 +328,32 @@ def test_run_claude_backend_passes_native_fast_mode_setting(monkeypatch):
     assert captured["args"][captured["args"].index("--model") + 1] == "claude-sonnet-4-6"
 
 
+def test_run_claude_backend_translates_ultracode_to_xhigh_and_setting(monkeypatch):
+    proc = FakeProc([
+        b'{"type":"system","session_id":"sid_ultracode"}\n',
+        b'{"type":"result","session_id":"sid_ultracode","result":"Ultra"}\n',
+    ])
+    captured = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(claude_runner, "AGENT_BACKEND", "claude", raising=False)
+    monkeypatch.setattr(claude_runner, "CLAUDE_CLI", "claude", raising=False)
+
+    text, session_id, used_fallback = asyncio.run(run_claude("hi", effort="ultracode"))
+
+    assert text == "Ultra"
+    assert session_id == "sid_ultracode"
+    assert used_fallback is False
+    assert "--effort" in captured["args"]
+    assert captured["args"][captured["args"].index("--effort") + 1] == "xhigh"
+    settings = captured["args"][captured["args"].index("--settings") + 1]
+    assert '"ultracode":true' in settings.replace(" ", "")
+
+
 def test_run_claude_backend_does_not_pollute_reply_when_fast_request_returns_standard(monkeypatch, capsys):
     proc = FakeProc([
         b'{"type":"system","session_id":"sid_standard"}\n',

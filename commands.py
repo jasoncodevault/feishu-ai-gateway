@@ -40,6 +40,7 @@ VALID_EFFORTS = {
     "high": "High capability. Equivalent to not setting the parameter.",
     "xhigh": "Extended capability for long-horizon work; availability is model-dependent.",
     "max": "Absolute maximum capability with no constraints on token spending; availability is model-dependent.",
+    "ultracode": "Claude Code setting: xhigh reasoning effort plus automatic workflow orchestration for substantive tasks.",
 }
 
 CODEX_VALID_EFFORTS = {
@@ -58,6 +59,7 @@ EFFORT_ALIASES = {
     "deeper": "xhigh",
     "ultra": "max",
     "ultrathink": "max",
+    "ultracode": "ultracode",
     "deep": "high",
     "maxthink": "max",
 }
@@ -110,7 +112,7 @@ HELP_TEXT = """\
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换模型（fable / opus / sonnet / haiku 或完整 ID）
 `/fast` — 查看 Fast 状态；`/fast on|off` 开关 Claude Code 原生 Fast 模式（适用于当前模型，成本更高）
-`/effort [级别]` — 切换 Claude effort level（low / medium / high / xhigh / max）
+`/effort [级别]` — 切换 Claude effort / Ultracode（low / medium / high / xhigh / max / ultracode）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
 `/cd [路径]` — 切换工具执行的工作目录
@@ -165,6 +167,36 @@ CODEX_HELP_TEXT = """\
 
 def _help_text() -> str:
     return CODEX_HELP_TEXT if AGENT_BACKEND == "codex" else HELP_TEXT
+
+
+def _fast_status_card(backend: str, tier: str, chat_id: str, model: str = "") -> dict:
+    """Render /fast like /effort: current state plus clickable choices."""
+    tier = tier or "standard"
+    is_fast = tier == "fast"
+    if backend == "codex":
+        text = (
+            f"当前 Codex service_tier：**{tier}**\n"
+            "Fast：更低延迟，credit rate 更高；Standard：默认服务档位。"
+        )
+    else:
+        model_line = f"\n模型：`{model}`" if model else ""
+        text = (
+            f"当前 Claude Fast：**{tier}**{model_line}\n"
+            "Fast：保持当前模型并请求 Claude Code Fast；Standard：默认服务档位。"
+        )
+    return {
+        "text": text,
+        "buttons": [
+            {
+                "text": ("✅ " if not is_fast else "") + "🐢 Standard",
+                "value": {"action": "run_cmd", "cmd": "/fast off", "cid": chat_id},
+            },
+            {
+                "text": ("✅ " if is_fast else "") + "🚀 Fast",
+                "value": {"action": "run_cmd", "cmd": "/fast on", "cid": chat_id},
+            },
+        ],
+    }
 
 
 def parse_command(text: str) -> Optional[Tuple[str, str]]:
@@ -938,31 +970,29 @@ async def handle_command(
             normalized = args.lower().strip() or "status"
             if normalized in ("on", "enable", "enabled", "true", "1"):
                 await store.set_service_tier(user_id, chat_id, "fast")
-                return "✅ 已开启 Codex Fast 模式：GPT-5.5 约 1.5× 输出速度，按官方文档约 2.5× credit rate。"
+                return _fast_status_card("codex", "fast", chat_id)
             if normalized in ("off", "disable", "disabled", "false", "0", "standard", "slow", "关", "关闭", "取消"):
                 await store.set_service_tier(user_id, chat_id, "standard")
-                return "✅ 已关闭 Codex Fast 模式，恢复 Standard。"
+                return _fast_status_card("codex", "standard", chat_id)
             if normalized in ("status", "s"):
                 cur = await store.get_current(user_id, chat_id)
                 tier = getattr(cur, "service_tier", "standard") or "standard"
-                return f"📊 当前 Codex 服务档位：**{tier}**"
+                return _fast_status_card("codex", tier, chat_id)
             return "❌ 用法：`/fast` 查看状态，`/fast on` 开启，`/fast off` 关闭。"
 
         normalized = args.lower().strip() or "status"
+        cur = await store.get_current(user_id, chat_id)
+        model = getattr(cur, "model", "") or ""
         if normalized in ("on", "enable", "enabled", "true", "1"):
             await store.set_service_tier(user_id, chat_id, "fast")
-            cur = await store.get_current(user_id, chat_id)
-            model = getattr(cur, "model", "当前模型") or "当前模型"
-            return f"✅ 已设置 Claude Fast 目标模式：后续请求将保持 `{model}` 并请求 Fast；实际是否进入 Fast 会按 Claude Code 返回的 `usage.speed` 校验。"
+            return _fast_status_card("claude", "fast", chat_id, model)
         if normalized in ("off", "disable", "disabled", "false", "0", "standard", "slow", "关", "关闭", "取消"):
             await store.set_service_tier(user_id, chat_id, "standard")
-            return "✅ 已关闭 Claude Fast 模式，恢复标准服务档位。"
+            return _fast_status_card("claude", "standard", chat_id, model)
         if normalized in ("status", "s"):
-            cur = await store.get_current(user_id, chat_id)
             tier = getattr(cur, "service_tier", "standard") or "standard"
-            return f"📊 当前 Claude Fast 档位：**{tier}**"
+            return _fast_status_card("claude", tier, chat_id, model)
         return "❌ 用法：`/fast` 查看状态，`/fast on` 开启，`/fast off` 关闭。"
-
     elif cmd in ("effort", "thinking", "think"):
         if AGENT_BACKEND == "codex":
             if cmd == "think" and not args:
@@ -1008,6 +1038,7 @@ async def handle_command(
                     {"text": "🧠 High", "value": {"action": "run_cmd", "cmd": "/effort high", "cid": chat_id}},
                     {"text": "🔥 XHigh", "value": {"action": "run_cmd", "cmd": "/effort xhigh", "cid": chat_id}},
                     {"text": "🔥 Max", "value": {"action": "run_cmd", "cmd": "/effort max", "cid": chat_id}},
+                    {"text": "🚀 Ultra Code", "value": {"action": "run_cmd", "cmd": "/effort ultracode", "cid": chat_id}},
                 ],
             }
         normalized = "".join(args.lower().split())

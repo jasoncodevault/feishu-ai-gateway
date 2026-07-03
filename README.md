@@ -133,9 +133,9 @@ Codex 后端会使用 `codex exec --json`，支持 `/model`、`/effort`、`/thin
 | `/model sonnet` | 切换到 Sonnet | 可填 Codex 完整模型 ID |
 | `/model haiku` | 切换到 Haiku | 可填 Codex 完整模型 ID |
 | `/model codex` | - | 切回 Codex 默认模型（默认 `gpt-5.5`） |
-| `/effort high` | 设置 Claude effort level（low/medium/high/xhigh/max） | 设置 Codex `model_reasoning_effort`（none/minimal/low/medium/high/xhigh，取值依模型而定） |
+| `/effort high` | 设置 Claude effort / Ultracode（low/medium/high/xhigh/max/ultracode） | 设置 Codex `model_reasoning_effort`（none/minimal/low/medium/high/xhigh，取值依模型而定） |
 | `/think` | 等同 `/effort high` | 等同 `/effort high` |
-| `/fast on` | Claude Code Fast 模式 | Codex Fast 模式 |
+| `/fast` | 查看并用按钮切换 Claude Code Fast 模式 | 查看并用按钮切换 Codex Fast 模式 |
 | `/mode bypass` | 跳过所有确认（默认） | 跳过所有确认 / 沙箱检查 |
 | `/mode plan` | 只规划不执行 | 只规划不执行（兼容命令） |
 | `/mode default` | 每次工具调用需确认 | 默认权限模式（兼容命令） |
@@ -247,7 +247,7 @@ Codex 后端会使用 `codex exec --json`，支持 `/model`、`/effort`、`/thin
 | `FEISHU_APP_SECRET` | 是 | - | 飞书应用 App Secret |
 | `AGENT_BACKEND` | 否 | `claude` | 后端选择：`claude` 或 `codex` |
 | `DEFAULT_MODEL` | 否 | Claude: `claude-opus-4-6`；Codex: `gpt-5.5` | 默认模型 |
-| `DEFAULT_EFFORT` | 否 | `auto` | 默认 effort。Claude 官方值：`low/medium/high/xhigh/max`；Codex `model_reasoning_effort`：`none/minimal/low/medium/high/xhigh`（取值依模型而定）。`auto` 表示网关不显式传该参数。 |
+| `DEFAULT_EFFORT` | 否 | `auto` | 默认 effort。Claude 官方值：`low/medium/high/xhigh/max`，另支持 Claude Code `ultracode`（xhigh + 自动 workflow 编排）；Codex `model_reasoning_effort`：`none/minimal/low/medium/high/xhigh`（取值依模型而定）。`auto` 表示网关不显式传该参数。 |
 | `DEFAULT_CWD` | 否 | `~` | CLI 默认工作目录 |
 | `PERMISSION_MODE` | 否 | `bypassPermissions` | 工具权限模式 |
 | `STREAM_CHUNK_SIZE` | 否 | `20` | 流式推送的字符积累阈值 |

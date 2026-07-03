@@ -182,10 +182,17 @@ async def run_claude(
         active_model = model
         if active_model:
             cmd += ["--model", active_model]
+        settings = {}
         if effort and effort != "auto":
-            cmd += ["--effort", effort]
+            if effort == "ultracode":
+                cmd += ["--effort", "xhigh"]
+                settings["ultracode"] = True
+            else:
+                cmd += ["--effort", effort]
         if service_tier in ("fast", "standard"):
-            cmd += ["--settings", json.dumps({"fastMode": service_tier == "fast"}, separators=(",", ":"))]
+            settings["fastMode"] = service_tier == "fast"
+        if settings:
+            cmd += ["--settings", json.dumps(settings, separators=(",", ":"))]
 
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)

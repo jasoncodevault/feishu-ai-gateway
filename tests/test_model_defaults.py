@@ -133,10 +133,12 @@ async def test_claude_fast_without_args_shows_status_instead_of_enabling(monkeyp
 
     reply = await handle_command("fast", "", "user_1", "chat_1", store)
 
+    assert isinstance(reply, dict)
     assert store.service_tier_calls == []
     assert store.model_calls == []
     assert store.effort_calls == []
-    assert "standard" in reply
+    assert "standard" in reply["text"]
+    assert [btn["text"] for btn in reply["buttons"]] == ["✅ 🐢 Standard", "🚀 Fast"]
 
 
 @pytest.mark.asyncio
@@ -147,11 +149,13 @@ async def test_claude_fast_on_enables_native_fast_mode(monkeypatch, tmp_path):
 
     reply = await handle_command("fast", "on", "user_1", "chat_1", store)
 
+    assert isinstance(reply, dict)
     assert store.service_tier_calls == [("user_1", "chat_1", "fast")]
     assert store.model_calls == []
     assert store.effort_calls == []
-    assert "claude-sonnet-4-6" in reply
-    assert "Claude Fast" in reply
+    assert "claude-sonnet-4-6" in reply["text"]
+    assert "Claude Fast" in reply["text"]
+    assert [btn["text"] for btn in reply["buttons"]] == ["🐢 Standard", "✅ 🚀 Fast"]
 
 
 @pytest.mark.asyncio
@@ -161,9 +165,10 @@ async def test_claude_fast_off_disables_native_fast_mode(monkeypatch):
 
     reply = await handle_command("fast", "off", "user_1", "chat_1", store)
 
+    assert isinstance(reply, dict)
     assert store.service_tier_calls == [("user_1", "chat_1", "standard")]
     assert store.effort_calls == []
-    assert "关闭" in reply
+    assert "standard" in reply["text"]
 
 
 @pytest.mark.asyncio
@@ -173,8 +178,9 @@ async def test_claude_fast_chinese_cancel_alias_disables_native_fast_mode(monkey
 
     reply = await handle_command("fast", "取消", "user_1", "chat_1", store)
 
+    assert isinstance(reply, dict)
     assert store.service_tier_calls == [("user_1", "chat_1", "standard")]
-    assert "关闭" in reply
+    assert "standard" in reply["text"]
 
 
 @pytest.mark.asyncio
@@ -184,10 +190,10 @@ async def test_codex_fast_on_enables_native_fast_service_tier(monkeypatch):
 
     reply = await handle_command("fast", "on", "user_1", "chat_1", store)
 
-    assert isinstance(reply, str)
+    assert isinstance(reply, dict)
     assert store.service_tier_calls == [("user_1", "chat_1", "fast")]
     assert store.effort_calls == []
-    assert "Fast" in reply
+    assert "Fast" in reply["text"]
 
 
 @pytest.mark.asyncio
@@ -197,9 +203,9 @@ async def test_codex_fast_without_args_shows_status_instead_of_enabling(monkeypa
 
     reply = await handle_command("fast", "", "user_1", "chat_1", store)
 
-    assert isinstance(reply, str)
+    assert isinstance(reply, dict)
     assert store.service_tier_calls == []
-    assert "standard" in reply
+    assert "standard" in reply["text"]
 
 
 @pytest.mark.asyncio
@@ -209,10 +215,10 @@ async def test_codex_fast_off_disables_native_fast_service_tier(monkeypatch):
 
     reply = await handle_command("fast", "off", "user_1", "chat_1", store)
 
-    assert isinstance(reply, str)
+    assert isinstance(reply, dict)
     assert store.service_tier_calls == [("user_1", "chat_1", "standard")]
     assert store.effort_calls == []
-    assert "Standard" in reply
+    assert "Standard" in reply["text"]
 
 
 @pytest.mark.asyncio
@@ -279,9 +285,14 @@ async def test_claude_effort_menu_uses_official_effort_levels(monkeypatch):
     reply = await handle_command("effort", "", "user_1", "chat_1", StoreWithCurrent())
     labels = [btn["text"] for btn in reply["buttons"]]
 
-    assert labels == ["⚡ Low", "⚖️ Medium", "🧠 High", "🔥 XHigh", "🔥 Max"]
+    assert labels == ["⚡ Low", "⚖️ Medium", "🧠 High", "🔥 XHigh", "🔥 Max", "🚀 Ultra Code"]
     assert "Claude effort level" in reply["text"]
     assert "Equivalent to not setting the parameter" in reply["text"]
+
+    store = FakeStore()
+    ultracode_reply = await handle_command("effort", "ultracode", "user_1", "chat_1", store)
+    assert store.effort_calls == [("user_1", "chat_1", "ultracode")]
+    assert "Ultracode" in ultracode_reply or "ultracode" in ultracode_reply
 
 
 def test_codex_usage_is_not_claude_oauth(monkeypatch):
