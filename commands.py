@@ -110,7 +110,7 @@ HELP_TEXT = """\
 `/new` 或 `/clear` — 开始新 session
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换模型（fable / opus / sonnet / haiku 或完整 ID）
-`/fast [on|off|status]` — Claude Code 原生 Fast 模式（Opus 专用，约 2.5× 输出速度，成本更高）
+`/fast` — 查看 Fast 状态；`/fast on|off` 开关 Claude Code 原生 Fast 模式（Opus 专用，约 2.5× 输出速度，成本更高）
 `/effort [级别]` — 切换思考深度（low / medium / high / xhigh / max / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
@@ -143,7 +143,7 @@ CODEX_HELP_TEXT = """\
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换 Codex 模型（默认 `gpt-5.5`，也可填完整 ID）
 `/think` — 切到高推理深度（等同 `/effort high`）
-`/fast [on|off|status]` — Codex 原生 Fast 模式（约 1.5× 速度，GPT-5.5 约 2.5× credit rate）
+`/fast` — 查看 Fast 状态；`/fast on|off` 开关 Codex 原生 Fast 模式（约 1.5× 速度，GPT-5.5 约 2.5× credit rate）
 `/effort [级别]` — 切换推理深度（minimal / low / medium / high / xhigh / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
@@ -936,32 +936,32 @@ async def handle_command(
 
     elif cmd == "fast":
         if AGENT_BACKEND == "codex":
-            normalized = args.lower().strip() or "on"
+            normalized = args.lower().strip() or "status"
             if normalized in ("on", "enable", "enabled", "true", "1"):
                 await store.set_service_tier(user_id, chat_id, "fast")
                 return "✅ 已开启 Codex Fast 模式：GPT-5.5 约 1.5× 输出速度，按官方文档约 2.5× credit rate。"
-            if normalized in ("off", "disable", "disabled", "false", "0"):
+            if normalized in ("off", "disable", "disabled", "false", "0", "standard", "slow", "关", "关闭", "取消"):
                 await store.set_service_tier(user_id, chat_id, "standard")
                 return "✅ 已关闭 Codex Fast 模式，恢复 Standard。"
             if normalized in ("status", "s"):
                 cur = await store.get_current(user_id, chat_id)
                 tier = getattr(cur, "service_tier", "standard") or "standard"
                 return f"📊 当前 Codex 服务档位：**{tier}**"
-            return "❌ 用法：`/fast` 或 `/fast on` 开启，`/fast off` 关闭，`/fast status` 查看。"
+            return "❌ 用法：`/fast` 查看状态，`/fast on` 开启，`/fast off` 关闭。"
 
-        normalized = args.lower().strip() or "on"
+        normalized = args.lower().strip() or "status"
         if normalized in ("on", "enable", "enabled", "true", "1"):
             await store.set_service_tier(user_id, chat_id, "fast")
             await store.set_model(user_id, chat_id, "claude-opus-4-8")
             return "✅ 已设置 Claude Fast 目标模式：后续请求将使用 Opus 4.8 并请求 Fast；实际是否进入 Fast 会按 Claude Code 返回的 `usage.speed` 校验。"
-        if normalized in ("off", "disable", "disabled", "false", "0"):
+        if normalized in ("off", "disable", "disabled", "false", "0", "standard", "slow", "关", "关闭", "取消"):
             await store.set_service_tier(user_id, chat_id, "standard")
             return "✅ 已关闭 Claude Fast 模式，恢复标准服务档位。"
         if normalized in ("status", "s"):
             cur = await store.get_current(user_id, chat_id)
             tier = getattr(cur, "service_tier", "standard") or "standard"
             return f"📊 当前 Claude Fast 档位：**{tier}**"
-        return "❌ 用法：`/fast` 或 `/fast on` 开启，`/fast off` 关闭，`/fast status` 查看。"
+        return "❌ 用法：`/fast` 查看状态，`/fast on` 开启，`/fast off` 关闭。"
 
     elif cmd in ("effort", "thinking", "think"):
         if AGENT_BACKEND == "codex":

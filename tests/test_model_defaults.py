@@ -20,6 +20,13 @@ class FakeStore:
     async def set_service_tier(self, user_id, chat_id, service_tier):
         self.service_tier_calls.append((user_id, chat_id, service_tier))
 
+    async def get_current(self, user_id, chat_id):
+        return type(
+            "Session",
+            (),
+            {"model": "claude-sonnet-4-6", "effort": "auto", "service_tier": "standard"},
+        )()
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -119,12 +126,26 @@ async def test_codex_help_is_backend_aware(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_claude_fast_enables_native_fast_mode(monkeypatch, tmp_path):
+async def test_claude_fast_without_args_shows_status_instead_of_enabling(monkeypatch, tmp_path):
     monkeypatch.setattr(commands, "AGENT_BACKEND", "claude", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_JSON", str(tmp_path / "missing-claude.json"))
     store = FakeStore()
 
     reply = await handle_command("fast", "", "user_1", "chat_1", store)
+
+    assert store.service_tier_calls == []
+    assert store.model_calls == []
+    assert store.effort_calls == []
+    assert "standard" in reply
+
+
+@pytest.mark.asyncio
+async def test_claude_fast_on_enables_native_fast_mode(monkeypatch, tmp_path):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "claude", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_JSON", str(tmp_path / "missing-claude.json"))
+    store = FakeStore()
+
+    reply = await handle_command("fast", "on", "user_1", "chat_1", store)
 
     assert store.service_tier_calls == [("user_1", "chat_1", "fast")]
     assert store.model_calls == [("user_1", "chat_1", "claude-opus-4-8")]
@@ -145,16 +166,39 @@ async def test_claude_fast_off_disables_native_fast_mode(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_codex_fast_enables_native_fast_service_tier(monkeypatch):
+async def test_claude_fast_chinese_cancel_alias_disables_native_fast_mode(monkeypatch):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "claude", raising=False)
+    store = FakeStore()
+
+    reply = await handle_command("fast", "取消", "user_1", "chat_1", store)
+
+    assert store.service_tier_calls == [("user_1", "chat_1", "standard")]
+    assert "关闭" in reply
+
+
+@pytest.mark.asyncio
+async def test_codex_fast_on_enables_native_fast_service_tier(monkeypatch):
+    monkeypatch.setattr(commands, "AGENT_BACKEND", "codex", raising=False)
+    store = FakeStore()
+
+    reply = await handle_command("fast", "on", "user_1", "chat_1", store)
+
+    assert isinstance(reply, str)
+    assert store.service_tier_calls == [("user_1", "chat_1", "fast")]
+    assert store.effort_calls == []
+    assert "Fast" in reply
+
+
+@pytest.mark.asyncio
+async def test_codex_fast_without_args_shows_status_instead_of_enabling(monkeypatch):
     monkeypatch.setattr(commands, "AGENT_BACKEND", "codex", raising=False)
     store = FakeStore()
 
     reply = await handle_command("fast", "", "user_1", "chat_1", store)
 
     assert isinstance(reply, str)
-    assert store.service_tier_calls == [("user_1", "chat_1", "fast")]
-    assert store.effort_calls == []
-    assert "Fast" in reply
+    assert store.service_tier_calls == []
+    assert "standard" in reply
 
 
 @pytest.mark.asyncio
