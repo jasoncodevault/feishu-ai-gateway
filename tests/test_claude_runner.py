@@ -325,7 +325,7 @@ def test_run_claude_backend_passes_native_fast_mode_setting(monkeypatch):
     settings = captured["args"][captured["args"].index("--settings") + 1]
     assert '"fastMode":true' in settings.replace(" ", "")
     assert "--model" in captured["args"]
-    assert captured["args"][captured["args"].index("--model") + 1] == "claude-opus-4-8"
+    assert captured["args"][captured["args"].index("--model") + 1] == "claude-sonnet-4-6"
 
 
 def test_run_claude_backend_does_not_pollute_reply_when_fast_request_returns_standard(monkeypatch, capsys):

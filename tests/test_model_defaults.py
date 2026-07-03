@@ -148,8 +148,9 @@ async def test_claude_fast_on_enables_native_fast_mode(monkeypatch, tmp_path):
     reply = await handle_command("fast", "on", "user_1", "chat_1", store)
 
     assert store.service_tier_calls == [("user_1", "chat_1", "fast")]
-    assert store.model_calls == [("user_1", "chat_1", "claude-opus-4-8")]
+    assert store.model_calls == []
     assert store.effort_calls == []
+    assert "claude-sonnet-4-6" in reply
     assert "Claude Fast" in reply
 
 

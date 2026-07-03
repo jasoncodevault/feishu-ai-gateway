@@ -110,7 +110,7 @@ HELP_TEXT = """\
 `/new` 或 `/clear` — 开始新 session
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
 `/model [名称]` — 切换模型（fable / opus / sonnet / haiku 或完整 ID）
-`/fast` — 查看 Fast 状态；`/fast on|off` 开关 Claude Code 原生 Fast 模式（Opus 专用，约 2.5× 输出速度，成本更高）
+`/fast` — 查看 Fast 状态；`/fast on|off` 开关 Claude Code 原生 Fast 模式（适用于当前模型，成本更高）
 `/effort [级别]` — 切换思考深度（low / medium / high / xhigh / max / auto）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
@@ -952,8 +952,9 @@ async def handle_command(
         normalized = args.lower().strip() or "status"
         if normalized in ("on", "enable", "enabled", "true", "1"):
             await store.set_service_tier(user_id, chat_id, "fast")
-            await store.set_model(user_id, chat_id, "claude-opus-4-8")
-            return "✅ 已设置 Claude Fast 目标模式：后续请求将使用 Opus 4.8 并请求 Fast；实际是否进入 Fast 会按 Claude Code 返回的 `usage.speed` 校验。"
+            cur = await store.get_current(user_id, chat_id)
+            model = getattr(cur, "model", "当前模型") or "当前模型"
+            return f"✅ 已设置 Claude Fast 目标模式：后续请求将保持 `{model}` 并请求 Fast；实际是否进入 Fast 会按 Claude Code 返回的 `usage.speed` 校验。"
         if normalized in ("off", "disable", "disabled", "false", "0", "standard", "slow", "关", "关闭", "取消"):
             await store.set_service_tier(user_id, chat_id, "standard")
             return "✅ 已关闭 Claude Fast 模式，恢复标准服务档位。"

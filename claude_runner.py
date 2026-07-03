@@ -180,8 +180,6 @@ async def run_claude(
         if active_session_id:
             cmd += ["--resume", active_session_id]
         active_model = model
-        if service_tier == "fast" and (not active_model or "opus" not in active_model.lower()):
-            active_model = "claude-opus-4-8"
         if active_model:
             cmd += ["--model", active_model]
         if effort and effort != "auto":
