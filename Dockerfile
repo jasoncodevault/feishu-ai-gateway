@@ -21,7 +21,7 @@ RUN apt-get update \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs gh \
-    && npm install -g @anthropic-ai/claude-code@2.1.198 @openai/codex@0.142.5 @larksuite/cli@1.0.64 \
+    && npm install -g @anthropic-ai/claude-code@2.1.201 @openai/codex@0.142.5 @larksuite/cli@1.0.64 \
     && ln -sf /usr/bin/lark-cli /usr/local/bin/larkcli \
     && groupadd -g 1000 claude \
     && useradd -m -u 1000 -g 1000 -s /bin/bash claude \
