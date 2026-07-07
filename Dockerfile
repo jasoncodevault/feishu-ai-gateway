@@ -34,6 +34,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY . /app
 
 COPY deploy/docker/claude-proxied /usr/local/bin/claude-proxied
-RUN chmod 0755 /usr/local/bin/claude-proxied
+COPY deploy/docker/cc-connect /usr/local/bin/cc-connect
+RUN chmod 0755 /usr/local/bin/claude-proxied /usr/local/bin/cc-connect
 
 CMD ["python", "main.py"]
