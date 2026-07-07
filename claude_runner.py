@@ -9,7 +9,14 @@ import os
 import subprocess as sp
 from typing import Callable, Optional
 
-from bot_config import AGENT_BACKEND, PERMISSION_MODE, CLAUDE_CLI, CODEX_CLI
+from bot_config import (
+    AGENT_BACKEND,
+    PERMISSION_MODE,
+    CLAUDE_CLI,
+    CODEX_CLI,
+    DISALLOWED_TOOLS,
+    FEISHU_BRIDGE_SYSTEM_PROMPT,
+)
 
 IDLE_TIMEOUT = 300  # 5 分钟无输出且无子进程，视为挂死
 _CHECK_INTERVAL = 30  # 静默时每 30 秒检查一次子进程
@@ -182,6 +189,10 @@ async def run_claude(
         active_model = model
         if active_model:
             cmd += ["--model", active_model]
+        if FEISHU_BRIDGE_SYSTEM_PROMPT:
+            cmd += ["--append-system-prompt", FEISHU_BRIDGE_SYSTEM_PROMPT]
+        if DISALLOWED_TOOLS:
+            cmd += ["--disallowedTools", ",".join(DISALLOWED_TOOLS)]
         settings = {}
         if effort and effort != "auto":
             if effort == "ultracode":

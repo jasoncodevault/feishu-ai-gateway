@@ -192,6 +192,40 @@ def test_run_claude_fires_tool_use_callback(monkeypatch):
     assert tool_calls[1] == ("Bash", {"command": "ls"})
 
 
+
+def test_run_claude_disallows_async_agent_and_appends_bridge_prompt(monkeypatch):
+    """Feishu --print bridge must not launch Claude Code background Agent subagents."""
+    proc = FakeProc([
+        b'{"type":"system","session_id":"sid_guard"}\n',
+        b'{"type":"result","session_id":"sid_guard","result":"guarded"}\n',
+    ])
+    captured = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(claude_runner, "AGENT_BACKEND", "claude", raising=False)
+    monkeypatch.setattr(claude_runner, "DISALLOWED_TOOLS", ["Agent"], raising=False)
+    monkeypatch.setattr(
+        claude_runner,
+        "FEISHU_BRIDGE_SYSTEM_PROMPT",
+        "no async Agent in Feishu --print bridge",
+        raising=False,
+    )
+
+    text, session_id, used_fallback = asyncio.run(run_claude("hi"))
+
+    assert text == "guarded"
+    assert session_id == "sid_guard"
+    assert used_fallback is False
+    assert "--append-system-prompt" in captured["args"]
+    assert "no async Agent in Feishu --print bridge" in captured["args"]
+    assert "--disallowedTools" in captured["args"]
+    idx = captured["args"].index("--disallowedTools")
+    assert captured["args"][idx + 1] == "Agent"
+
 def test_run_claude_codex_backend_starts_exec_and_parses_json(monkeypatch):
     proc = FakeProc([
         b'{"type":"thread.started","thread_id":"thread_123"}\n',
