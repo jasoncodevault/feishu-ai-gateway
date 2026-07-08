@@ -290,7 +290,7 @@ index 8c4aa1a..7ef5891 100644
  func (sp *streamPreview) canPreview() bool {
  	sp.mu.Lock()
 diff --git a/platform/feishu/feishu.go b/platform/feishu/feishu.go
-index 7e89771..4939d39 100644
+index 7e89771..208bcbb 100644
 --- a/platform/feishu/feishu.go
 +++ b/platform/feishu/feishu.go
 @@ -463,6 +463,10 @@ func (p *Platform) getBotOpenID() string {
@@ -304,3 +304,50 @@ index 7e89771..4939d39 100644
  	return p.useInteractiveCard
  }
  
+@@ -2639,7 +2643,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+ 	}
+ 
+ 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
+-	msgType, msgBody := buildReplyContent(content)
++	msgType, msgBody := p.buildReplyContent(content)
+ 
+ 	if !p.shouldUseThreadOrReplyAPI(rc) {
+ 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+@@ -2661,7 +2665,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+ 	}
+ 
+ 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
+-	msgType, msgBody := buildReplyContent(content)
++	msgType, msgBody := p.buildReplyContent(content)
+ 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+ }
+ 
+@@ -2913,6 +2917,28 @@ func detectMimeType(data []byte) string {
+ 	return "image/png"
+ }
+ 
++func (p *Platform) buildReplyContent(content string) (msgType string, body string) {
++	// Feishu does not generate mention events for <at> tags in card/post
++	// messages sent by bots. Force MsgTypeText when a real mention is present
++	// so Feishu recognizes it and notifies the target bot.
++	hasMention := strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`)
++	if hasMention {
++		b, _ := json.Marshal(map[string]string{"text": content})
++		return larkim.MsgTypeText, string(b)
++	}
++	// Jason prefers consistent message-card rendering for cc-connect Feishu
++	// replies, including short/plain intermediate acknowledgements. When card
++	// mode is enabled, send all non-mention text as a card, not only content
++	// containing Markdown indicators.
++	if p.useInteractiveCard {
++		if countMarkdownTables(content) > maxCardTables {
++			return larkim.MsgTypePost, buildPostMdJSON(content)
++		}
++		return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
++	}
++	return buildReplyContent(content)
++}
++
+ func buildReplyContent(content string) (msgType string, body string) {
+ 	// Feishu does not generate mention events for <at> tags in card/post
+ 	// messages sent by bots. Force MsgTypeText when a real mention is present
