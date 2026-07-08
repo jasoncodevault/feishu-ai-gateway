@@ -1,5 +1,5 @@
 diff --git a/agent/claudecode/claude_usage.go b/agent/claudecode/claude_usage.go
-index f16bd40..67de8b4 100644
+index f16bd40..0972503 100644
 --- a/agent/claudecode/claude_usage.go
 +++ b/agent/claudecode/claude_usage.go
 @@ -29,11 +29,12 @@ const (
@@ -124,7 +124,36 @@ index f16bd40..67de8b4 100644
  	if strings.Contains(lower, "quick safety check") || strings.Contains(lower, "yes, i trust this folder") {
  		return "\r"
  	}
-@@ -348,29 +408,35 @@ func parseClaudeUsageWindow(lines []string, header string, windowSeconds int, no
+@@ -322,14 +382,27 @@ func parseClaudeUsageReport(text string, now time.Time) (*core.UsageReport, erro
+ 		return nil, err
+ 	}
+ 
++	windows := []core.UsageWindow{session, week}
++	if fable, ok := parseClaudeUsageOptionalWindow(lines, "Current week (Fable)", claudeUsageWeekWindowSeconds, now); ok {
++		windows = append(windows, fable)
++	}
++
+ 	report.Buckets = []core.UsageBucket{{
+ 		Name:    "Usage",
+ 		Allowed: true,
+-		Windows: []core.UsageWindow{session, week},
++		Windows: windows,
+ 	}}
+ 	return report, nil
+ }
+ 
++func parseClaudeUsageOptionalWindow(lines []string, header string, windowSeconds int, now time.Time) (core.UsageWindow, bool) {
++	window, err := parseClaudeUsageWindow(lines, header, windowSeconds, now)
++	if err != nil {
++		return core.UsageWindow{}, false
++	}
++	return window, true
++}
++
+ func parseClaudeUsageWindow(lines []string, header string, windowSeconds int, now time.Time) (core.UsageWindow, error) {
+ 	start := -1
+ 	headerLower := strings.ToLower(header)
+@@ -348,29 +421,35 @@ func parseClaudeUsageWindow(lines []string, header string, windowSeconds int, no
  		usedPercent *int
  		resetRaw    string
  	)
@@ -171,10 +200,10 @@ index f16bd40..67de8b4 100644
  		return core.UsageWindow{}, fmt.Errorf("claudecode: missing usage percentage in %s block", header)
  	}
 diff --git a/agent/claudecode/claude_usage_test.go b/agent/claudecode/claude_usage_test.go
-index 9d9f518..a4dce3e 100644
+index 9d9f518..d8897f0 100644
 --- a/agent/claudecode/claude_usage_test.go
 +++ b/agent/claudecode/claude_usage_test.go
-@@ -29,6 +29,41 @@ func TestSanitizeClaudeUsageOutput_RendersCursorMoves(t *testing.T) {
+@@ -29,6 +29,45 @@ func TestSanitizeClaudeUsageOutput_RendersCursorMoves(t *testing.T) {
  	}
  }
  
@@ -200,7 +229,7 @@ index 9d9f518..a4dce3e 100644
 +	if err != nil {
 +		t.Fatalf("parseClaudeUsageReport returned error: %v", err)
 +	}
-+	if len(report.Buckets) != 1 || len(report.Buckets[0].Windows) != 2 {
++	if len(report.Buckets) != 1 || len(report.Buckets[0].Windows) != 3 {
 +		t.Fatalf("unexpected bucket layout: %+v", report.Buckets)
 +	}
 +	session := report.Buckets[0].Windows[0]
@@ -210,6 +239,10 @@ index 9d9f518..a4dce3e 100644
 +	week := report.Buckets[0].Windows[1]
 +	if week.UsedPercent != 58 || week.ResetAtUnix == 0 {
 +		t.Fatalf("bad week window: %+v", week)
++	}
++	fable := report.Buckets[0].Windows[2]
++	if fable.Name != "Current week (Fable)" || fable.UsedPercent != 84 || fable.ResetAtUnix == 0 {
++		t.Fatalf("bad fable window: %+v", fable)
 +	}
 +}
 +
@@ -410,7 +443,7 @@ index e24973a..f58f447 100644
  				evt := core.Event{Type: core.EventText, Content: text}
  				select {
 diff --git a/core/engine.go b/core/engine.go
-index d51fc27..5090e65 100644
+index d51fc27..44e14b4 100644
 --- a/core/engine.go
 +++ b/core/engine.go
 @@ -4736,6 +4736,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
@@ -450,6 +483,195 @@ index d51fc27..5090e65 100644
  	defer cancel()
  
  	report, err := reporter.GetUsage(fetchCtx)
+@@ -8557,13 +8571,15 @@ func formatUsageReport(report *UsageReport, lang Language) string {
+ }
+ 
+ func formatUsageBlocks(report *UsageReport, lang Language) string {
+-	primary, secondary := selectUsageWindows(report)
+ 	var sections []string
+-	if primary != nil {
+-		sections = append(sections, formatUsageBlock(lang, primary))
+-	}
+-	if secondary != nil {
+-		sections = append(sections, formatUsageBlock(lang, secondary))
++	for _, bucket := range report.Buckets {
++		if len(bucket.Windows) == 0 {
++			continue
++		}
++		for i := range bucket.Windows {
++			sections = append(sections, formatUsageBlock(lang, &bucket.Windows[i]))
++		}
++		break
+ 	}
+ 	if len(sections) == 0 {
+ 		return ""
+@@ -8624,7 +8640,11 @@ func formatUsageBlock(lang Language, window *UsageWindow) string {
+ 		remaining = 0
+ 	}
+ 	var sb strings.Builder
+-	sb.WriteString(usageWindowLabel(lang, window.WindowSeconds))
++	sb.WriteString("**")
++	sb.WriteString(usageWindowDisplayLabel(lang, window))
++	sb.WriteString("**\n")
++	sb.WriteString(formatUsageProgressBar(window.UsedPercent))
++	sb.WriteString(fmt.Sprintf(" %d%%", window.UsedPercent))
+ 	sb.WriteString("\n")
+ 	sb.WriteString(usageRemainingLabel(lang))
+ 	sb.WriteString(usageColon(lang))
+@@ -8632,10 +8652,28 @@ func formatUsageBlock(lang Language, window *UsageWindow) string {
+ 	sb.WriteString("\n")
+ 	sb.WriteString(usageResetLabel(lang))
+ 	sb.WriteString(usageColon(lang))
+-	sb.WriteString(formatUsageResetTime(lang, window.ResetAfterSeconds))
++	sb.WriteString(formatUsageResetTime(lang, window.ResetAfterSeconds, window.ResetAtUnix))
+ 	return sb.String()
+ }
+ 
++func formatUsageProgressBar(usedPercent int) string {
++	if usedPercent < 0 {
++		usedPercent = 0
++	}
++	if usedPercent > 100 {
++		usedPercent = 100
++	}
++	const barLen = 20
++	filled := int(float64(usedPercent)/100*barLen + 0.5)
++	if filled < 0 {
++		filled = 0
++	}
++	if filled > barLen {
++		filled = barLen
++	}
++	return strings.Repeat("█", filled) + strings.Repeat("░", barLen-filled)
++}
++
+ func (e *Engine) renderUsageCard(report *UsageReport) *Card {
+ 	lang := e.i18n.CurrentLang()
+ 	return NewCard().
+@@ -8645,20 +8683,31 @@ func (e *Engine) renderUsageCard(report *UsageReport) *Card {
+ 		Build()
+ }
+ 
+-func formatUsageResetTime(lang Language, resetAfterSeconds int) string {
+-	if resetAfterSeconds <= 0 {
+-		switch lang {
+-		case LangChinese, LangTraditionalChinese:
+-			return "-"
+-		case LangJapanese:
+-			return "-"
+-		case LangSpanish:
+-			return "-"
+-		default:
+-			return "-"
++func formatUsageResetTime(lang Language, resetAfterSeconds int, resetAtUnix int64) string {
++	if resetAfterSeconds <= 0 && resetAtUnix <= 0 {
++		return "-"
++	}
++	if resetAtUnix <= 0 {
++		return formatDurationI18n(time.Duration(resetAfterSeconds)*time.Second, lang)
++	}
++	loc := time.Local
++	if lang == LangChinese || lang == LangTraditionalChinese {
++		if sh, err := time.LoadLocation("Asia/Shanghai"); err == nil {
++			loc = sh
+ 		}
+ 	}
+-	return formatDurationI18n(time.Duration(resetAfterSeconds)*time.Second, lang)
++	resetAt := time.Unix(resetAtUnix, 0).In(loc)
++	relative := formatDurationI18n(time.Duration(resetAfterSeconds)*time.Second, lang)
++	switch lang {
++	case LangChinese, LangTraditionalChinese:
++		return fmt.Sprintf("%s（%s后）", resetAt.Format("01/02 15:04"), relative)
++	case LangJapanese:
++		return fmt.Sprintf("%s（%s後）", resetAt.Format("01/02 15:04"), relative)
++	case LangSpanish:
++		return fmt.Sprintf("%s (en %s)", resetAt.Format("01/02 15:04"), relative)
++	default:
++		return fmt.Sprintf("%s (in %s)", resetAt.Format("Jan 2 15:04"), relative)
++	}
+ }
+ 
+ func usageAccountLabel(lang Language) string {
+@@ -8676,6 +8725,45 @@ func usageAccountLabel(lang Language) string {
+ 	}
+ }
+ 
++func usageWindowDisplayLabel(lang Language, window *UsageWindow) string {
++	if window == nil {
++		return usageWindowLabel(lang, 0)
++	}
++	base := usageWindowLabel(lang, window.WindowSeconds)
++	name := strings.ToLower(window.Name)
++	suffix := ""
++	switch {
++	case strings.Contains(name, "fable"):
++		suffix = "Fable"
++	case strings.Contains(name, "all models"):
++		switch lang {
++		case LangChinese:
++			suffix = "全部模型"
++		case LangTraditionalChinese:
++			suffix = "全部模型"
++		case LangJapanese:
++			suffix = "全モデル"
++		case LangSpanish:
++			suffix = "todos los modelos"
++		default:
++			suffix = "all models"
++		}
++	}
++	if suffix == "" || window.WindowSeconds == claudeUsageSessionWindowSecondsCore() {
++		return base
++	}
++	switch lang {
++	case LangChinese, LangTraditionalChinese, LangJapanese:
++		return base + "（" + suffix + "）"
++	default:
++		return base + " (" + suffix + ")"
++	}
++}
++
++func claudeUsageSessionWindowSecondsCore() int {
++	return 5 * 60 * 60
++}
++
+ func usageWindowLabel(lang Language, seconds int) string {
+ 	switch seconds {
+ 	case 18000:
+diff --git a/core/engine_test.go b/core/engine_test.go
+index b53f3c6..356d6dc 100644
+--- a/core/engine_test.go
++++ b/core/engine_test.go
+@@ -15867,3 +15867,29 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
+ 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+ 	}
+ }
++
++func TestFormatUsageReport_IncludesFableWindow(t *testing.T) {
++	report := &UsageReport{
++		Provider: "claudecode",
++		Buckets: []UsageBucket{{
++			Name:    "Usage",
++			Allowed: true,
++			Windows: []UsageWindow{
++				{Name: "Current session", WindowSeconds: 5 * 60 * 60, UsedPercent: 45, ResetAfterSeconds: 3600},
++				{Name: "Current week (all models)", WindowSeconds: 7 * 24 * 60 * 60, UsedPercent: 58, ResetAfterSeconds: 7200},
++				{Name: "Current week (Fable)", WindowSeconds: 7 * 24 * 60 * 60, UsedPercent: 84, ResetAfterSeconds: 7200},
++			},
++		}},
++	}
++
++	got := formatUsageReport(report, LangChinese)
++	if !strings.Contains(got, "7日限额（全部模型）") {
++		t.Fatalf("usage report missing all-models week label: %q", got)
++	}
++	if !strings.Contains(got, "7日限额（Fable）") {
++		t.Fatalf("usage report missing Fable week label: %q", got)
++	}
++	if !strings.Contains(got, "剩余：16%") {
++		t.Fatalf("usage report missing Fable remaining percentage: %q", got)
++	}
++}
 diff --git a/core/streaming.go b/core/streaming.go
 index 8c4aa1a..7ef5891 100644
 --- a/core/streaming.go
