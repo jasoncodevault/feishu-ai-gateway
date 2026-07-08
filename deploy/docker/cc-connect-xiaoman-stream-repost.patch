@@ -1,3 +1,57 @@
+diff --git a/agent/claudecode/claude_usage.go b/agent/claudecode/claude_usage.go
+index f16bd40..95e0041 100644
+--- a/agent/claudecode/claude_usage.go
++++ b/agent/claudecode/claude_usage.go
+@@ -47,8 +47,9 @@ type claudeUsageProbeState struct {
+ }
+ 
+ func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
+-	if _, err := exec.LookPath("claude"); err != nil {
+-		return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH")
++	cmdPath, _ := a.usageProbeCommand()
++	if _, err := exec.LookPath(cmdPath); err != nil {
++		return nil, fmt.Errorf("claudecode: CLI %q not found in PATH", cmdPath)
+ 	}
+ 
+ 	screen, err := a.runClaudeUsageProbe(ctx)
+@@ -73,7 +74,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
+ 		"--permission-mode", "plan",
+ 		"--no-chrome",
+ 	}
+-	cmd := exec.CommandContext(probeCtx, "claude", args...)
++	cmdPath, cmdPrefixArgs := a.usageProbeCommand()
++	cmdArgs := append(append([]string{}, cmdPrefixArgs...), args...)
++	cmd := exec.CommandContext(probeCtx, cmdPath, cmdArgs...)
+ 	cmd.Dir = workDir
+ 
+ 	env := filterEnv(os.Environ(), "CLAUDECODE")
+@@ -205,6 +208,16 @@ func (a *Agent) usageProbeEnv() []string {
+ 	return a.runtimeEnvLocked()
+ }
+ 
++func (a *Agent) usageProbeCommand() (string, []string) {
++	a.mu.Lock()
++	defer a.mu.Unlock()
++	cmd := strings.TrimSpace(a.cmd)
++	if cmd == "" {
++		cmd = "claude"
++	}
++	return cmd, append([]string(nil), a.cliExtraArgs...)
++}
++
+ func nextClaudeUsageProbeAction(screen string, state *claudeUsageProbeState, now time.Time) string {
+ 	if now.Sub(state.lastActionAt) < claudeUsageActionGap {
+ 		return ""
+@@ -253,6 +266,9 @@ func promptActionForScreen(screen string) string {
+ 	if lower == "" {
+ 		return ""
+ 	}
++	if strings.Contains(lower, "choose the text style") || strings.Contains(lower, "syntax theme") || strings.Contains(lower, "dark mode") {
++		return "\r"
++	}
+ 	if strings.Contains(lower, "quick safety check") || strings.Contains(lower, "yes, i trust this folder") {
+ 		return "\r"
+ 	}
 diff --git a/agent/claudecode/claudecode.go b/agent/claudecode/claudecode.go
 index be561f5..05a1354 100644
 --- a/agent/claudecode/claudecode.go
