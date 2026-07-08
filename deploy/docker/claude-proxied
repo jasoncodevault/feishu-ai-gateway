@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
-"""Run Claude Code through a per-process SOCKS proxy via proxychains4.
+"""Run Claude Code through a per-process proxy.
 
 Reads CLAUDE_PROXY / CLAUDE_ALL_PROXY in standard URI form:
   http://user:pass@host:port
   socks5://user:pass@host:port
   socks5h://user:pass@host:port
   socks5://host:port
+
+HTTP proxies are passed directly to Claude Code/Node via HTTP(S)_PROXY.
+SOCKS proxies are exposed as a local HTTP CONNECT proxy so Claude Code still
+uses Node's native proxy path rather than LD_PRELOAD/proxychains. This avoids
+Claude Code firstParty streaming hangs seen with proxychains + SOCKS5.
 """
+import base64
 import os
+import select
+import socket
+import subprocess
 import sys
 import tempfile
-from pathlib import Path
+import threading
 from urllib.parse import urlparse, unquote
 
 proxy = os.environ.get("CLAUDE_PROXY") or os.environ.get("CLAUDE_ALL_PROXY")
@@ -19,69 +28,182 @@ if not proxy:
 
 u = urlparse(proxy)
 scheme = (u.scheme or "").lower()
-if scheme not in {"http", "socks5", "socks5h"}:
-    print(f"claude-proxied: unsupported proxy scheme {scheme!r}; expected http/socks5/socks5h", file=sys.stderr)
+if scheme not in {"http", "https", "socks5", "socks5h"}:
+    print(f"claude-proxied: unsupported proxy scheme {scheme!r}; expected http/https/socks5/socks5h", file=sys.stderr)
     sys.exit(2)
 if not u.hostname or not u.port:
     print("claude-proxied: proxy must include host and port", file=sys.stderr)
     sys.exit(2)
 
-if scheme == "http":
-    # Claude Code/Node can use standard HTTP(S)_PROXY env directly. This is
-    # faster and less fragile than LD_PRELOAD proxychains for HTTP CONNECT.
-    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
-        os.environ[key] = proxy
-    # Keep local/private endpoints (MCP servers, callback services, Docker gateways)
-    # off the external proxy path. Include explicit Docker gateway IPs because
-    # some Node HTTP stacks ignore CIDR entries in NO_PROXY.
-    no_proxy_hosts = [
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "172.19.0.1",
-        "172.20.0.1",
-        "192.168.0.0/16",
-    ]
+NO_PROXY_HOSTS = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "172.19.0.1",
+    "172.20.0.1",
+    "192.168.0.0/16",
+]
+
+
+def merge_no_proxy() -> None:
     existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
-    merged = ",".join([p for p in [existing, *no_proxy_hosts] if p])
+    merged = ",".join([p for p in [existing, *NO_PROXY_HOSTS] if p])
     os.environ["NO_PROXY"] = merged
     os.environ["no_proxy"] = merged
+
+
+def set_native_http_proxy(proxy_url: str) -> None:
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+        os.environ[key] = proxy_url
+    merge_no_proxy()
+
+
+if scheme in {"http", "https"}:
+    # Claude Code/Node can use standard HTTP(S)_PROXY env directly. This is
+    # faster and less fragile than LD_PRELOAD proxychains for HTTP CONNECT.
+    set_native_http_proxy(proxy)
     os.execvp("claude", ["claude", *sys.argv[1:]])
 
-host = u.hostname
-port = str(u.port)
-user = unquote(u.username or "")
-password = unquote(u.password or "")
-parts = ["socks5", host, port]
-if user:
-    parts.extend([user, password])
+SOCKS_HOST = u.hostname
+SOCKS_PORT = int(u.port)
+SOCKS_USER = unquote(u.username or "")
+SOCKS_PASSWORD = unquote(u.password or "")
 
-conf = """
-strict_chain
-proxy_dns
-remote_dns_subnet 224
-tcp_read_time_out 15000
-tcp_connect_time_out 8000
-# Bypass private/local networks so MCP servers and local services remain reachable
-# from Claude Code even when external Anthropic traffic is proxied.
-localnet 127.0.0.0/255.0.0.0
-localnet 10.0.0.0/255.0.0.0
-localnet 172.16.0.0/255.240.0.0
-localnet 192.168.0.0/255.255.0.0
-[ProxyList]
-{line}
-""".format(line=" ".join(parts))
 
-fd, path = tempfile.mkstemp(prefix="proxychains-claude-", suffix=".conf")
-os.close(fd)
-Path(path).write_text(conf)
-os.chmod(path, 0o600)
+def recvall(sock: socket.socket, n: int) -> bytes:
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise OSError("unexpected EOF from SOCKS proxy")
+        data += chunk
+    return data
 
-# Avoid accidental double-proxy behavior inside Claude/Node; proxychains owns routing.
-for key in ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy"):
-    os.environ.pop(key, None)
 
-argv = ["proxychains4", "-q", "-f", path, "claude", *sys.argv[1:]]
-os.execvp("proxychains4", argv)
+def socks5_connect(target_host: str, target_port: int) -> socket.socket:
+    s = socket.create_connection((SOCKS_HOST, SOCKS_PORT), timeout=20)
+    s.settimeout(20)
+    if SOCKS_USER:
+        s.sendall(b"\x05\x02\x00\x02")
+    else:
+        s.sendall(b"\x05\x01\x00")
+    ver, method = recvall(s, 2)
+    if ver != 5:
+        raise OSError("invalid SOCKS version")
+    if method == 0x02:
+        user_b = SOCKS_USER.encode()
+        pass_b = SOCKS_PASSWORD.encode()
+        if len(user_b) > 255 or len(pass_b) > 255:
+            raise OSError("SOCKS username/password too long")
+        s.sendall(b"\x01" + bytes([len(user_b)]) + user_b + bytes([len(pass_b)]) + pass_b)
+        auth_ver, status = recvall(s, 2)
+        if auth_ver != 1 or status != 0:
+            raise OSError("SOCKS authentication failed")
+    elif method != 0x00:
+        raise OSError(f"SOCKS proxy selected unsupported auth method {method}")
+
+    host_b = target_host.encode("idna")
+    if len(host_b) > 255:
+        raise OSError("target host too long")
+    req = b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + int(target_port).to_bytes(2, "big")
+    s.sendall(req)
+    header = recvall(s, 4)
+    if header[0] != 5 or header[1] != 0:
+        raise OSError(f"SOCKS connect failed, reply={header[1] if header else 'none'}")
+    atyp = header[3]
+    if atyp == 1:
+        recvall(s, 4)
+    elif atyp == 3:
+        ln = recvall(s, 1)[0]
+        recvall(s, ln)
+    elif atyp == 4:
+        recvall(s, 16)
+    else:
+        raise OSError("invalid SOCKS address type")
+    recvall(s, 2)
+    s.settimeout(None)
+    return s
+
+
+def tunnel(a: socket.socket, b: socket.socket) -> None:
+    sockets = [a, b]
+    try:
+        while True:
+            readable, _, errored = select.select(sockets, [], sockets, 300)
+            if errored:
+                break
+            if not readable:
+                continue
+            for src in readable:
+                dst = b if src is a else a
+                data = src.recv(65536)
+                if not data:
+                    return
+                dst.sendall(data)
+    finally:
+        for sock in sockets:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def handle_client(client: socket.socket) -> None:
+    with client:
+        client.settimeout(30)
+        request = b""
+        while b"\r\n\r\n" not in request and len(request) < 65536:
+            chunk = client.recv(4096)
+            if not chunk:
+                return
+            request += chunk
+        header, _, rest = request.partition(b"\r\n\r\n")
+        first = header.split(b"\r\n", 1)[0].decode("latin1", "replace")
+        parts = first.split()
+        if len(parts) < 3 or parts[0].upper() != "CONNECT":
+            client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n")
+            return
+        target = parts[1]
+        if target.startswith("[") and "]:" in target:
+            host, port_s = target[1:].rsplit("]:", 1)
+        elif ":" in target:
+            host, port_s = target.rsplit(":", 1)
+        else:
+            host, port_s = target, "443"
+        upstream = socks5_connect(host, int(port_s))
+        client.sendall(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: claude-proxied\r\n\r\n")
+        if rest:
+            upstream.sendall(rest)
+        client.settimeout(None)
+        tunnel(client, upstream)
+
+
+def serve_http_connect(server: socket.socket) -> None:
+    while True:
+        try:
+            client, _ = server.accept()
+        except OSError:
+            return
+        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
+
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0))
+server.listen(128)
+local_port = server.getsockname()[1]
+threading.Thread(target=serve_http_connect, args=(server,), daemon=True).start()
+
+local_proxy = f"http://127.0.0.1:{local_port}"
+set_native_http_proxy(local_proxy)
+
+try:
+    proc = subprocess.run(["claude", *sys.argv[1:]])
+    sys.exit(proc.returncode)
+finally:
+    try:
+        server.close()
+    except OSError:
+        pass
