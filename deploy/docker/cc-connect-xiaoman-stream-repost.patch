@@ -507,7 +507,7 @@ index e24973a..f58f447 100644
  				evt := core.Event{Type: core.EventText, Content: text}
  				select {
 diff --git a/core/engine.go b/core/engine.go
-index d51fc27..1e99983 100644
+index d51fc27..21a4e90 100644
 --- a/core/engine.go
 +++ b/core/engine.go
 @@ -4736,6 +4736,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
@@ -569,7 +569,7 @@ index d51fc27..1e99983 100644
  	}
  	if len(sections) == 0 {
  		return ""
-@@ -8619,23 +8635,37 @@ func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
+@@ -8619,23 +8635,39 @@ func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
  }
  
  func formatUsageBlock(lang Language, window *UsageWindow) string {
@@ -586,7 +586,9 @@ index d51fc27..1e99983 100644
 +	sb.WriteString("**")
 +	sb.WriteString(usageWindowDisplayLabel(lang, window))
 +	sb.WriteString("**\n")
++	sb.WriteString("`")
 +	sb.WriteString(formatUsageProgressBar(window.UsedPercent))
++	sb.WriteString("`")
 +	sb.WriteString(fmt.Sprintf(" %d%%", window.UsedPercent))
  	sb.WriteString("\n")
  	sb.WriteString(usageResetLabel(lang))
@@ -617,7 +619,7 @@ index d51fc27..1e99983 100644
  func (e *Engine) renderUsageCard(report *UsageReport) *Card {
  	lang := e.i18n.CurrentLang()
  	return NewCard().
-@@ -8645,20 +8675,31 @@ func (e *Engine) renderUsageCard(report *UsageReport) *Card {
+@@ -8645,20 +8677,31 @@ func (e *Engine) renderUsageCard(report *UsageReport) *Card {
  		Build()
  }
  
@@ -661,7 +663,7 @@ index d51fc27..1e99983 100644
  }
  
  func usageAccountLabel(lang Language) string {
-@@ -8676,6 +8717,45 @@ func usageAccountLabel(lang Language) string {
+@@ -8676,6 +8719,45 @@ func usageAccountLabel(lang Language) string {
  	}
  }
  
@@ -707,7 +709,7 @@ index d51fc27..1e99983 100644
  func usageWindowLabel(lang Language, seconds int) string {
  	switch seconds {
  	case 18000:
-@@ -9467,7 +9547,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
+@@ -9467,7 +9549,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
  			if current == "" {
  				sb.WriteString(e.i18n.T(MsgModelDefault))
  			} else {
@@ -716,7 +718,7 @@ index d51fc27..1e99983 100644
  				sb.WriteString("\n")
  			}
  			sb.WriteString("\n")
-@@ -9479,21 +9559,12 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
+@@ -9479,21 +9561,12 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
  				if m.Name == current {
  					marker = "> "
  				}
@@ -741,7 +743,7 @@ index d51fc27..1e99983 100644
  				}
  				if m.Name == current {
  					label = "▶ " + label
-@@ -12778,18 +12849,13 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
+@@ -12778,18 +12851,13 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
  	if current == "" {
  		sb.WriteString(e.i18n.T(MsgModelDefault))
  	} else {
@@ -762,7 +764,7 @@ index d51fc27..1e99983 100644
  		val := fmt.Sprintf("act:/model switch %d", i+1)
  		opts = append(opts, CardSelectOption{Text: label, Value: val})
  		if m.Name == current {
-@@ -12805,10 +12871,48 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
+@@ -12805,10 +12873,48 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
  	return cb.Build()
  }
  
@@ -812,7 +814,7 @@ index d51fc27..1e99983 100644
  		Build()
  }
  
-@@ -12822,7 +12926,7 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
+@@ -12822,7 +12928,7 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
  	}
  	return NewCard().
  		Title(e.i18n.T(MsgCardTitleModel), "green").
@@ -822,7 +824,7 @@ index d51fc27..1e99983 100644
  		Build()
  }
 diff --git a/core/engine_test.go b/core/engine_test.go
-index b53f3c6..21882ec 100644
+index b53f3c6..e1e1ba7 100644
 --- a/core/engine_test.go
 +++ b/core/engine_test.go
 @@ -5951,11 +5951,9 @@ func TestCmdUsage_Success(t *testing.T) {
@@ -919,8 +921,8 @@ index b53f3c6..21882ec 100644
 +	if strings.Contains(got, "剩余") {
 +		t.Fatalf("usage report should not include redundant remaining text: %q", got)
 +	}
-+	if !strings.Contains(got, "█████████████████░░░ 84%") {
-+		t.Fatalf("usage report missing Fable progress bar: %q", got)
++	if !strings.Contains(got, "`█████████████████░░░` 84%") {
++		t.Fatalf("usage report missing fixed-width Fable progress bar: %q", got)
 +	}
 +}
 +
