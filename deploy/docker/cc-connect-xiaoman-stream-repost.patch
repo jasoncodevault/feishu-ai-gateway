@@ -1149,7 +1149,7 @@ index 8c4aa1a..7ef5891 100644
  func (sp *streamPreview) canPreview() bool {
  	sp.mu.Lock()
 diff --git a/platform/feishu/card.go b/platform/feishu/card.go
-index 7570239..a30535f 100644
+index 7570239..5258d30 100644
 --- a/platform/feishu/card.go
 +++ b/platform/feishu/card.go
 @@ -243,6 +243,8 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
@@ -1161,7 +1161,7 @@ index 7570239..a30535f 100644
  		case core.CardNote:
  			elements = append(elements, map[string]any{
  				"tag":      "note",
-@@ -259,6 +261,71 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
+@@ -259,6 +261,73 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
  	return result
  }
  
@@ -1173,7 +1173,7 @@ index 7570239..a30535f 100644
 +	if percent > 100 {
 +		percent = 100
 +	}
-+	const totalWidth = 320
++	const totalWidth = 260
 +	filledWidth := totalWidth * percent / 100
 +	if percent > 0 && filledWidth < 16 {
 +		filledWidth = 16
@@ -1192,18 +1192,19 @@ index 7570239..a30535f 100644
 +		columns = append(columns, progressColumn(emptyWidth, "grey"))
 +	}
 +	columns = append(columns, map[string]any{
-+		"tag":            "column",
-+		"width":          "auto",
-+		"vertical_align": "center",
++		"tag":              "column",
++		"width":            "56px",
++		"vertical_align":   "center",
++		"horizontal_align": "left",
 +		"elements": []map[string]any{{
-+			"tag":     "markdown",
++			"tag":     "plain_text",
 +			"content": fmt.Sprintf("%d%%", percent),
 +		}},
 +	})
 +	elements = append(elements, map[string]any{
 +		"tag":                "column_set",
 +		"flex_mode":          "none",
-+		"horizontal_spacing": "0px",
++		"horizontal_spacing": "4px",
 +		"margin":             "0px",
 +		"columns":            columns,
 +	})
@@ -1222,10 +1223,11 @@ index 7570239..a30535f 100644
 +		"width":            fmt.Sprintf("%dpx", width),
 +		"background_style": color,
 +		"vertical_align":   "center",
-+		"padding":          "4px 0px 4px 0px",
++		"padding":          "0px 0px 0px 0px",
 +		"elements": []map[string]any{{
-+			"tag":     "markdown",
-+			"content": " ",
++			"tag":       "markdown",
++			"content":   " ",
++			"text_size": "notation",
 +		}},
 +	}
 +}
@@ -1234,10 +1236,10 @@ index 7570239..a30535f 100644
  	id      string
  	text    string
 diff --git a/platform/feishu/card_test.go b/platform/feishu/card_test.go
-index 5f30095..2063656 100644
+index 5f30095..53ec0f9 100644
 --- a/platform/feishu/card_test.go
 +++ b/platform/feishu/card_test.go
-@@ -312,3 +312,36 @@ func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
+@@ -312,3 +312,42 @@ func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
  		t.Errorf("whitespace footer should fall through to buildCardJSON")
  	}
  }
@@ -1262,14 +1264,20 @@ index 5f30095..2063656 100644
 +	filled := columns[0].(map[string]any)
 +	empty := columns[1].(map[string]any)
 +	percent := columns[2].(map[string]any)
-+	if filled["width"] != "268px" || empty["width"] != "52px" {
-+		t.Fatalf("bar widths = %#v/%#v, want 268px/52px", filled["width"], empty["width"])
++	if filled["width"] != "218px" || empty["width"] != "42px" {
++		t.Fatalf("bar widths = %#v/%#v, want 218px/42px", filled["width"], empty["width"])
 +	}
 +	if filled["background_style"] == empty["background_style"] {
 +		t.Fatalf("filled and empty styles should differ: %#v", filled["background_style"])
 +	}
 +	percentElems := percent["elements"].([]any)
 +	percentMd := percentElems[0].(map[string]any)
++	if percent["width"] != "56px" {
++		t.Fatalf("percent column width = %#v, want 56px", percent["width"])
++	}
++	if percentMd["tag"] != "plain_text" {
++		t.Fatalf("percent tag = %#v, want plain_text", percentMd["tag"])
++	}
 +	if percentMd["content"] != "84%" {
 +		t.Fatalf("percent content = %#v, want 84%%", percentMd["content"])
 +	}
