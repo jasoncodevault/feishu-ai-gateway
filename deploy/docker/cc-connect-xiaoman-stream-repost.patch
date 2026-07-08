@@ -192,7 +192,7 @@ index e24973a..f58f447 100644
  				evt := core.Event{Type: core.EventText, Content: text}
  				select {
 diff --git a/core/engine.go b/core/engine.go
-index d51fc27..f3e0524 100644
+index d51fc27..a3976b0 100644
 --- a/core/engine.go
 +++ b/core/engine.go
 @@ -4736,6 +4736,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
@@ -204,7 +204,7 @@ index d51fc27..f3e0524 100644
 +	// Other platforms keep upstream behavior to avoid surprising test/client UX.
 +	if streamCard == nil {
 +		if pref, ok := state.platform.(ImmediatePreviewPreference); ok && pref.StartPreviewImmediately() {
-+			sp.startPlaceholder("处理中…")
++			sp.startPlaceholder("思考中…")
 +		}
 +	}
 +
@@ -217,7 +217,7 @@ index d51fc27..f3e0524 100644
  				// Send instant reply for queued turn if no streaming card is active.
 +				if streamCard == nil {
 +					if pref, ok := queued.platform.(ImmediatePreviewPreference); ok && pref.StartPreviewImmediately() {
-+						sp.startPlaceholder("处理中…")
++						sp.startPlaceholder("思考中…")
 +					}
 +				}
  				if e.instantReply.Enabled && streamCard == nil {
