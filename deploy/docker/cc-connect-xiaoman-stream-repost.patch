@@ -1149,7 +1149,7 @@ index 8c4aa1a..7ef5891 100644
  func (sp *streamPreview) canPreview() bool {
  	sp.mu.Lock()
 diff --git a/platform/feishu/card.go b/platform/feishu/card.go
-index 7570239..5258d30 100644
+index 7570239..ff9ffa5 100644
 --- a/platform/feishu/card.go
 +++ b/platform/feishu/card.go
 @@ -243,6 +243,8 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
@@ -1197,7 +1197,7 @@ index 7570239..5258d30 100644
 +		"vertical_align":   "center",
 +		"horizontal_align": "left",
 +		"elements": []map[string]any{{
-+			"tag":     "plain_text",
++			"tag":     "markdown",
 +			"content": fmt.Sprintf("%d%%", percent),
 +		}},
 +	})
@@ -1236,7 +1236,7 @@ index 7570239..5258d30 100644
  	id      string
  	text    string
 diff --git a/platform/feishu/card_test.go b/platform/feishu/card_test.go
-index 5f30095..53ec0f9 100644
+index 5f30095..b29ef54 100644
 --- a/platform/feishu/card_test.go
 +++ b/platform/feishu/card_test.go
 @@ -312,3 +312,42 @@ func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
@@ -1275,8 +1275,8 @@ index 5f30095..53ec0f9 100644
 +	if percent["width"] != "56px" {
 +		t.Fatalf("percent column width = %#v, want 56px", percent["width"])
 +	}
-+	if percentMd["tag"] != "plain_text" {
-+		t.Fatalf("percent tag = %#v, want plain_text", percentMd["tag"])
++	if percentMd["tag"] != "markdown" {
++		t.Fatalf("percent tag = %#v, want markdown", percentMd["tag"])
 +	}
 +	if percentMd["content"] != "84%" {
 +		t.Fatalf("percent content = %#v, want 84%%", percentMd["content"])
