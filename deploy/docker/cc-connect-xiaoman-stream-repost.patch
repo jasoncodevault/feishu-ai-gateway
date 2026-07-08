@@ -1149,7 +1149,7 @@ index 8c4aa1a..7ef5891 100644
  func (sp *streamPreview) canPreview() bool {
  	sp.mu.Lock()
 diff --git a/platform/feishu/card.go b/platform/feishu/card.go
-index 7570239..386f632 100644
+index 7570239..a30535f 100644
 --- a/platform/feishu/card.go
 +++ b/platform/feishu/card.go
 @@ -243,6 +243,8 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
@@ -1187,9 +1187,9 @@ index 7570239..386f632 100644
 +	elements := []map[string]any{
 +		{"tag": "markdown", "content": "**" + block.Title + "**"},
 +	}
-+	columns := []map[string]any{progressColumn(filledWidth, "rgba(245,245,245,1)")}
++	columns := []map[string]any{progressColumn(filledWidth, "blue")}
 +	if emptyWidth > 0 {
-+		columns = append(columns, progressColumn(emptyWidth, "rgba(245,245,245,0.18)"))
++		columns = append(columns, progressColumn(emptyWidth, "grey"))
 +	}
 +	columns = append(columns, map[string]any{
 +		"tag":            "column",
