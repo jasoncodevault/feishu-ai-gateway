@@ -506,8 +506,108 @@ index e24973a..f58f447 100644
  			if text, ok := item["text"].(string); ok && text != "" {
  				evt := core.Event{Type: core.EventText, Content: text}
  				select {
+diff --git a/core/card.go b/core/card.go
+index 5e819f8..bc18cfe 100644
+--- a/core/card.go
++++ b/core/card.go
+@@ -62,18 +62,29 @@ type CardSelect struct {
+ 	InitValue   string // pre-selected option value (empty = none)
+ }
+ 
++// CardProgressBlock renders a labeled percentage progress row.
++// Platform renderers with layout support should render a real fixed-width bar;
++// text-only fallbacks degrade to a textual progress line.
++type CardProgressBlock struct {
++	Title       string
++	UsedPercent int
++	ResetLabel  string
++	ResetValue  string
++}
++
+ // CardSelectOption is one item in a CardSelect dropdown.
+ type CardSelectOption struct {
+ 	Text  string
+ 	Value string
+ }
+ 
+-func (CardMarkdown) cardElement() {}
+-func (CardDivider) cardElement()  {}
+-func (CardActions) cardElement()  {}
+-func (CardNote) cardElement()     {}
+-func (CardListItem) cardElement() {}
+-func (CardSelect) cardElement()   {}
++func (CardMarkdown) cardElement()      {}
++func (CardDivider) cardElement()       {}
++func (CardActions) cardElement()       {}
++func (CardNote) cardElement()          {}
++func (CardListItem) cardElement()      {}
++func (CardSelect) cardElement()        {}
++func (CardProgressBlock) cardElement() {}
+ 
+ // CardButton represents a clickable button inside a CardActions element.
+ type CardButton struct {
+@@ -200,6 +211,16 @@ func (b *CardBuilder) Select(placeholder string, options []CardSelectOption, ini
+ 	return b
+ }
+ 
++// ProgressBlock appends a labeled percentage progress block.
++func (b *CardBuilder) ProgressBlock(title string, usedPercent int, resetLabel, resetValue string) *CardBuilder {
++	if title != "" {
++		b.card.Elements = append(b.card.Elements, CardProgressBlock{
++			Title: title, UsedPercent: usedPercent, ResetLabel: resetLabel, ResetValue: resetValue,
++		})
++	}
++	return b
++}
++
+ // Note appends a footnote element.
+ func (b *CardBuilder) Note(text string) *CardBuilder {
+ 	if text != "" {
+@@ -270,12 +291,42 @@ func (c *Card) RenderText() string {
+ 		case CardNote:
+ 			sb.WriteString(e.Text)
+ 			sb.WriteString("\n")
++		case CardProgressBlock:
++			sb.WriteString("**")
++			sb.WriteString(e.Title)
++			sb.WriteString("**\n")
++			sb.WriteString(renderTextProgressBar(e.UsedPercent))
++			sb.WriteString(fmt.Sprintf(" %d%%\n", e.UsedPercent))
++			if e.ResetLabel != "" || e.ResetValue != "" {
++				sb.WriteString(e.ResetLabel)
++				sb.WriteString(e.ResetValue)
++				sb.WriteString("\n")
++			}
++			sb.WriteString("\n")
+ 		}
+ 	}
+ 
+ 	return strings.TrimRight(sb.String(), "\n")
+ }
+ 
++func renderTextProgressBar(usedPercent int) string {
++	if usedPercent < 0 {
++		usedPercent = 0
++	}
++	if usedPercent > 100 {
++		usedPercent = 100
++	}
++	const barLen = 20
++	filled := int(float64(usedPercent)/100*barLen + 0.5)
++	if filled < 0 {
++		filled = 0
++	}
++	if filled > barLen {
++		filled = barLen
++	}
++	return strings.Repeat("█", filled) + strings.Repeat("░", barLen-filled)
++}
++
+ // HasButtons returns true if the card contains any interactive elements.
+ func (c *Card) HasButtons() bool {
+ 	for _, elem := range c.Elements {
 diff --git a/core/engine.go b/core/engine.go
-index d51fc27..21a4e90 100644
+index d51fc27..903ef38 100644
 --- a/core/engine.go
 +++ b/core/engine.go
 @@ -4736,6 +4736,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
@@ -569,7 +669,7 @@ index d51fc27..21a4e90 100644
  	}
  	if len(sections) == 0 {
  		return ""
-@@ -8619,23 +8635,39 @@ func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
+@@ -8619,46 +8635,87 @@ func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
  }
  
  func formatUsageBlock(lang Language, window *UsageWindow) string {
@@ -586,9 +686,7 @@ index d51fc27..21a4e90 100644
 +	sb.WriteString("**")
 +	sb.WriteString(usageWindowDisplayLabel(lang, window))
 +	sb.WriteString("**\n")
-+	sb.WriteString("`")
 +	sb.WriteString(formatUsageProgressBar(window.UsedPercent))
-+	sb.WriteString("`")
 +	sb.WriteString(fmt.Sprintf(" %d%%", window.UsedPercent))
  	sb.WriteString("\n")
  	sb.WriteString(usageResetLabel(lang))
@@ -618,9 +716,32 @@ index d51fc27..21a4e90 100644
 +
  func (e *Engine) renderUsageCard(report *UsageReport) *Card {
  	lang := e.i18n.CurrentLang()
- 	return NewCard().
-@@ -8645,20 +8677,31 @@ func (e *Engine) renderUsageCard(report *UsageReport) *Card {
- 		Build()
+-	return NewCard().
+-		Title(usageCardTitle(lang), "indigo").
+-		Markdown(strings.TrimSpace(formatUsageReport(report, lang))).
+-		Buttons(e.cardBackButton()).
+-		Build()
++	cb := NewCard().Title(usageCardTitle(lang), "indigo")
++	if report == nil {
++		return cb.Markdown(usageUnavailableText(lang)).Buttons(e.cardBackButton()).Build()
++	}
++	cb.Markdown(usageAccountLabel(lang) + accountDisplay(report))
++	for _, bucket := range report.Buckets {
++		if len(bucket.Windows) == 0 {
++			continue
++		}
++		for i := range bucket.Windows {
++			window := &bucket.Windows[i]
++			cb.ProgressBlock(
++				usageWindowDisplayLabel(lang, window),
++				window.UsedPercent,
++				usageResetLabel(lang)+usageColon(lang),
++				formatUsageResetTime(lang, window.ResetAfterSeconds, window.ResetAtUnix),
++			)
++		}
++		break
++	}
++	return cb.Buttons(e.cardBackButton()).Build()
  }
  
 -func formatUsageResetTime(lang Language, resetAfterSeconds int) string {
@@ -663,7 +784,7 @@ index d51fc27..21a4e90 100644
  }
  
  func usageAccountLabel(lang Language) string {
-@@ -8676,6 +8719,45 @@ func usageAccountLabel(lang Language) string {
+@@ -8676,6 +8733,45 @@ func usageAccountLabel(lang Language) string {
  	}
  }
  
@@ -709,7 +830,7 @@ index d51fc27..21a4e90 100644
  func usageWindowLabel(lang Language, seconds int) string {
  	switch seconds {
  	case 18000:
-@@ -9467,7 +9549,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
+@@ -9467,7 +9563,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
  			if current == "" {
  				sb.WriteString(e.i18n.T(MsgModelDefault))
  			} else {
@@ -718,7 +839,7 @@ index d51fc27..21a4e90 100644
  				sb.WriteString("\n")
  			}
  			sb.WriteString("\n")
-@@ -9479,21 +9561,12 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
+@@ -9479,21 +9575,12 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
  				if m.Name == current {
  					marker = "> "
  				}
@@ -743,7 +864,7 @@ index d51fc27..21a4e90 100644
  				}
  				if m.Name == current {
  					label = "▶ " + label
-@@ -12778,18 +12851,13 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
+@@ -12778,18 +12865,13 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
  	if current == "" {
  		sb.WriteString(e.i18n.T(MsgModelDefault))
  	} else {
@@ -764,7 +885,7 @@ index d51fc27..21a4e90 100644
  		val := fmt.Sprintf("act:/model switch %d", i+1)
  		opts = append(opts, CardSelectOption{Text: label, Value: val})
  		if m.Name == current {
-@@ -12805,10 +12873,48 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
+@@ -12805,10 +12887,48 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
  	return cb.Build()
  }
  
@@ -814,7 +935,7 @@ index d51fc27..21a4e90 100644
  		Build()
  }
  
-@@ -12822,7 +12928,7 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
+@@ -12822,7 +12942,7 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
  	}
  	return NewCard().
  		Title(e.i18n.T(MsgCardTitleModel), "green").
@@ -824,7 +945,7 @@ index d51fc27..21a4e90 100644
  		Build()
  }
 diff --git a/core/engine_test.go b/core/engine_test.go
-index b53f3c6..e1e1ba7 100644
+index b53f3c6..21882ec 100644
 --- a/core/engine_test.go
 +++ b/core/engine_test.go
 @@ -5951,11 +5951,9 @@ func TestCmdUsage_Success(t *testing.T) {
@@ -921,8 +1042,8 @@ index b53f3c6..e1e1ba7 100644
 +	if strings.Contains(got, "剩余") {
 +		t.Fatalf("usage report should not include redundant remaining text: %q", got)
 +	}
-+	if !strings.Contains(got, "`█████████████████░░░` 84%") {
-+		t.Fatalf("usage report missing fixed-width Fable progress bar: %q", got)
++	if !strings.Contains(got, "█████████████████░░░ 84%") {
++		t.Fatalf("usage report missing Fable progress bar: %q", got)
 +	}
 +}
 +
@@ -1027,6 +1148,132 @@ index 8c4aa1a..7ef5891 100644
  // canPreview returns true if the platform supports message updating and is not disabled.
  func (sp *streamPreview) canPreview() bool {
  	sp.mu.Lock()
+diff --git a/platform/feishu/card.go b/platform/feishu/card.go
+index 7570239..386f632 100644
+--- a/platform/feishu/card.go
++++ b/platform/feishu/card.go
+@@ -243,6 +243,8 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
+ 				"tag":     "action",
+ 				"actions": []map[string]any{selectElem},
+ 			})
++		case core.CardProgressBlock:
++			elements = append(elements, renderProgressBlock(e)...)
+ 		case core.CardNote:
+ 			elements = append(elements, map[string]any{
+ 				"tag":      "note",
+@@ -259,6 +261,71 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
+ 	return result
+ }
+ 
++func renderProgressBlock(block core.CardProgressBlock) []map[string]any {
++	percent := block.UsedPercent
++	if percent < 0 {
++		percent = 0
++	}
++	if percent > 100 {
++		percent = 100
++	}
++	const totalWidth = 320
++	filledWidth := totalWidth * percent / 100
++	if percent > 0 && filledWidth < 16 {
++		filledWidth = 16
++	}
++	emptyWidth := totalWidth - filledWidth
++	if percent < 100 && emptyWidth < 16 {
++		emptyWidth = 16
++		filledWidth = totalWidth - emptyWidth
++	}
++
++	elements := []map[string]any{
++		{"tag": "markdown", "content": "**" + block.Title + "**"},
++	}
++	columns := []map[string]any{progressColumn(filledWidth, "rgba(245,245,245,1)")}
++	if emptyWidth > 0 {
++		columns = append(columns, progressColumn(emptyWidth, "rgba(245,245,245,0.18)"))
++	}
++	columns = append(columns, map[string]any{
++		"tag":            "column",
++		"width":          "auto",
++		"vertical_align": "center",
++		"elements": []map[string]any{{
++			"tag":     "markdown",
++			"content": fmt.Sprintf("%d%%", percent),
++		}},
++	})
++	elements = append(elements, map[string]any{
++		"tag":                "column_set",
++		"flex_mode":          "none",
++		"horizontal_spacing": "0px",
++		"margin":             "0px",
++		"columns":            columns,
++	})
++	if block.ResetLabel != "" || block.ResetValue != "" {
++		elements = append(elements, map[string]any{
++			"tag":     "markdown",
++			"content": block.ResetLabel + block.ResetValue,
++		})
++	}
++	return elements
++}
++
++func progressColumn(width int, color string) map[string]any {
++	return map[string]any{
++		"tag":              "column",
++		"width":            fmt.Sprintf("%dpx", width),
++		"background_style": color,
++		"vertical_align":   "center",
++		"padding":          "4px 0px 4px 0px",
++		"elements": []map[string]any{{
++			"tag":     "markdown",
++			"content": " ",
++		}},
++	}
++}
++
+ type deleteModeCheckerRow struct {
+ 	id      string
+ 	text    string
+diff --git a/platform/feishu/card_test.go b/platform/feishu/card_test.go
+index 5f30095..2063656 100644
+--- a/platform/feishu/card_test.go
++++ b/platform/feishu/card_test.go
+@@ -312,3 +312,36 @@ func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
+ 		t.Errorf("whitespace footer should fall through to buildCardJSON")
+ 	}
+ }
++
++func TestRenderCardMap_ProgressBlockUsesFixedWidthColumns(t *testing.T) {
++	card := core.NewCard().
++		ProgressBlock("7日限额（Fable）", 84, "重置：", "07/13 23:00").
++		Build()
++	got := decodeRenderedCard(t, card)
++	elements, ok := got["elements"].([]any)
++	if !ok || len(elements) != 3 {
++		t.Fatalf("elements = %#v, want title/progress/reset", got["elements"])
++	}
++	columnSet, ok := elements[1].(map[string]any)
++	if !ok || columnSet["tag"] != "column_set" {
++		t.Fatalf("progress element = %#v, want column_set", elements[1])
++	}
++	columns, ok := columnSet["columns"].([]any)
++	if !ok || len(columns) != 3 {
++		t.Fatalf("columns = %#v, want filled/empty/percent", columnSet["columns"])
++	}
++	filled := columns[0].(map[string]any)
++	empty := columns[1].(map[string]any)
++	percent := columns[2].(map[string]any)
++	if filled["width"] != "268px" || empty["width"] != "52px" {
++		t.Fatalf("bar widths = %#v/%#v, want 268px/52px", filled["width"], empty["width"])
++	}
++	if filled["background_style"] == empty["background_style"] {
++		t.Fatalf("filled and empty styles should differ: %#v", filled["background_style"])
++	}
++	percentElems := percent["elements"].([]any)
++	percentMd := percentElems[0].(map[string]any)
++	if percentMd["content"] != "84%" {
++		t.Fatalf("percent content = %#v, want 84%%", percentMd["content"])
++	}
++}
 diff --git a/platform/feishu/feishu.go b/platform/feishu/feishu.go
 index 7e89771..208bcbb 100644
 --- a/platform/feishu/feishu.go
