@@ -1,5 +1,5 @@
 diff --git a/agent/claudecode/claude_usage.go b/agent/claudecode/claude_usage.go
-index f16bd40..0972503 100644
+index f16bd40..2637ce5 100644
 --- a/agent/claudecode/claude_usage.go
 +++ b/agent/claudecode/claude_usage.go
 @@ -29,11 +29,12 @@ const (
@@ -20,7 +20,7 @@ index f16bd40..0972503 100644
  )
  
  type claudeUsageProbeState struct {
-@@ -47,17 +48,52 @@ type claudeUsageProbeState struct {
+@@ -47,17 +48,54 @@ type claudeUsageProbeState struct {
  }
  
  func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
@@ -51,10 +51,12 @@ index f16bd40..0972503 100644
 +		cmd.Dir = workDir
 +	}
 +	env := filterEnv(os.Environ(), "CLAUDECODE")
-+	env = append(env, "DISABLE_TELEMETRY=true")
-+	env = append(env, "DISABLE_COST_WARNINGS=true")
++	env = filterEnv(env, "DISABLE_TELEMETRY")
++	env = filterEnv(env, "DISABLE_COST_WARNINGS")
 +	if extra := a.usageProbeEnv(); len(extra) > 0 {
 +		env = core.MergeEnv(env, extra)
++		env = filterEnv(env, "DISABLE_TELEMETRY")
++		env = filterEnv(env, "DISABLE_COST_WARNINGS")
 +	}
 +	cmd.Env = env
 +	out, err := cmd.CombinedOutput()
@@ -77,7 +79,7 @@ index f16bd40..0972503 100644
  func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
  	probeCtx, cancel := context.WithCancel(ctx)
  	defer cancel()
-@@ -73,7 +109,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
+@@ -73,14 +111,18 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
  		"--permission-mode", "plan",
  		"--no-chrome",
  	}
@@ -88,7 +90,18 @@ index f16bd40..0972503 100644
  	cmd.Dir = workDir
  
  	env := filterEnv(os.Environ(), "CLAUDECODE")
-@@ -205,6 +243,22 @@ func (a *Agent) usageProbeEnv() []string {
+-	env = append(env, "DISABLE_TELEMETRY=true")
+-	env = append(env, "DISABLE_COST_WARNINGS=true")
++	env = filterEnv(env, "DISABLE_TELEMETRY")
++	env = filterEnv(env, "DISABLE_COST_WARNINGS")
+ 	if extra := a.usageProbeEnv(); len(extra) > 0 {
+ 		env = core.MergeEnv(env, extra)
++		env = filterEnv(env, "DISABLE_TELEMETRY")
++		env = filterEnv(env, "DISABLE_COST_WARNINGS")
+ 	}
+ 	cmd.Env = env
+ 
+@@ -205,6 +247,22 @@ func (a *Agent) usageProbeEnv() []string {
  	return a.runtimeEnvLocked()
  }
  
@@ -111,7 +124,7 @@ index f16bd40..0972503 100644
  func nextClaudeUsageProbeAction(screen string, state *claudeUsageProbeState, now time.Time) string {
  	if now.Sub(state.lastActionAt) < claudeUsageActionGap {
  		return ""
-@@ -253,6 +307,12 @@ func promptActionForScreen(screen string) string {
+@@ -253,6 +311,12 @@ func promptActionForScreen(screen string) string {
  	if lower == "" {
  		return ""
  	}
@@ -124,15 +137,19 @@ index f16bd40..0972503 100644
  	if strings.Contains(lower, "quick safety check") || strings.Contains(lower, "yes, i trust this folder") {
  		return "\r"
  	}
-@@ -322,14 +382,27 @@ func parseClaudeUsageReport(text string, now time.Time) (*core.UsageReport, erro
+@@ -317,19 +381,46 @@ func parseClaudeUsageReport(text string, now time.Time) (*core.UsageReport, erro
+ 	if err != nil {
  		return nil, err
  	}
+-	week, err := parseClaudeUsageWindow(lines, "Current week", claudeUsageWeekWindowSeconds, now)
+-	if err != nil {
+-		return nil, err
++	weekWindows := parseClaudeUsageWeekWindows(lines, now)
++	if len(weekWindows) == 0 {
++		return nil, fmt.Errorf("claudecode: missing Current week block in Claude Code /usage output")
+ 	}
++	windows := append([]core.UsageWindow{session}, weekWindows...)
  
-+	windows := []core.UsageWindow{session, week}
-+	if fable, ok := parseClaudeUsageOptionalWindow(lines, "Current week (Fable)", claudeUsageWeekWindowSeconds, now); ok {
-+		windows = append(windows, fable)
-+	}
-+
  	report.Buckets = []core.UsageBucket{{
  		Name:    "Usage",
  		Allowed: true,
@@ -142,18 +159,48 @@ index f16bd40..0972503 100644
  	return report, nil
  }
  
-+func parseClaudeUsageOptionalWindow(lines []string, header string, windowSeconds int, now time.Time) (core.UsageWindow, bool) {
-+	window, err := parseClaudeUsageWindow(lines, header, windowSeconds, now)
-+	if err != nil {
-+		return core.UsageWindow{}, false
++func parseClaudeUsageWeekWindows(lines []string, now time.Time) []core.UsageWindow {
++	var windows []core.UsageWindow
++	for i, line := range lines {
++		lower := strings.ToLower(strings.TrimSpace(line))
++		if !strings.HasPrefix(lower, "current week") {
++			continue
++		}
++		name := usageWindowNameFromLine(line)
++		if window, err := parseClaudeUsageWindowAt(lines, i, name, claudeUsageWeekWindowSeconds, now); err == nil {
++			windows = append(windows, window)
++		}
 +	}
-+	return window, true
++	return windows
++}
++
++func usageWindowNameFromLine(line string) string {
++	name := strings.TrimSpace(line)
++	if before, _, ok := strings.Cut(name, ":"); ok {
++		name = strings.TrimSpace(before)
++	}
++	if name == "" {
++		return "Current week"
++	}
++	return name
 +}
 +
  func parseClaudeUsageWindow(lines []string, header string, windowSeconds int, now time.Time) (core.UsageWindow, error) {
  	start := -1
  	headerLower := strings.ToLower(header)
-@@ -348,29 +421,35 @@ func parseClaudeUsageWindow(lines []string, header string, windowSeconds int, no
+@@ -343,40 +434,53 @@ func parseClaudeUsageWindow(lines []string, header string, windowSeconds int, no
+ 	if start < 0 {
+ 		return core.UsageWindow{}, fmt.Errorf("claudecode: missing %s block in Claude Code /usage output", header)
+ 	}
++	return parseClaudeUsageWindowAt(lines, start, header, windowSeconds, now)
++}
++
++func parseClaudeUsageWindowAt(lines []string, start int, name string, windowSeconds int, now time.Time) (core.UsageWindow, error) {
++	if start < 0 || start >= len(lines) {
++		return core.UsageWindow{}, fmt.Errorf("claudecode: missing %s block in Claude Code /usage output", name)
++	}
+ 
+ 	var (
  		usedPercent *int
  		resetRaw    string
  	)
@@ -190,17 +237,25 @@ index f16bd40..0972503 100644
 +			continue
 +		}
 +		lower := strings.ToLower(line)
-+		if i > start+1 && (strings.HasPrefix(lower, "current ") || strings.HasPrefix(lower, "extra usage")) {
++		if strings.HasPrefix(lower, "current ") || strings.HasPrefix(lower, "extra usage") || strings.HasPrefix(lower, "what's contributing") {
 +			break
 +		}
 +		parseFields(line)
 +	}
 +
  	if usedPercent == nil {
- 		return core.UsageWindow{}, fmt.Errorf("claudecode: missing usage percentage in %s block", header)
+-		return core.UsageWindow{}, fmt.Errorf("claudecode: missing usage percentage in %s block", header)
++		return core.UsageWindow{}, fmt.Errorf("claudecode: missing usage percentage in %s block", name)
+ 	}
+ 
+ 	window := core.UsageWindow{
+-		Name:          header,
++		Name:          name,
+ 		UsedPercent:   *usedPercent,
+ 		WindowSeconds: windowSeconds,
  	}
 diff --git a/agent/claudecode/claude_usage_test.go b/agent/claudecode/claude_usage_test.go
-index 9d9f518..d8897f0 100644
+index 9d9f518..39bcb02 100644
 --- a/agent/claudecode/claude_usage_test.go
 +++ b/agent/claudecode/claude_usage_test.go
 @@ -29,6 +29,45 @@ func TestSanitizeClaudeUsageOutput_RendersCursorMoves(t *testing.T) {
@@ -249,6 +304,15 @@ index 9d9f518..d8897f0 100644
  func TestParseClaudeUsageReport_Success(t *testing.T) {
  	loc := mustLoadLocation(t, "Asia/Seoul")
  	now := time.Date(2026, time.December, 22, 12, 0, 0, 0, loc)
+@@ -74,7 +113,7 @@ Extra usage not enabled
+ 	}
+ 
+ 	week := report.Buckets[0].Windows[1]
+-	if week.Name != "Current week" {
++	if week.Name != "Current week (all models)" {
+ 		t.Fatalf("week.Name = %q", week.Name)
+ 	}
+ 	if week.WindowSeconds != 604800 {
 diff --git a/agent/claudecode/claudecode.go b/agent/claudecode/claudecode.go
 index be561f5..05a1354 100644
 --- a/agent/claudecode/claudecode.go
@@ -443,7 +507,7 @@ index e24973a..f58f447 100644
  				evt := core.Event{Type: core.EventText, Content: text}
  				select {
 diff --git a/core/engine.go b/core/engine.go
-index d51fc27..44e14b4 100644
+index d51fc27..1e99983 100644
 --- a/core/engine.go
 +++ b/core/engine.go
 @@ -4736,6 +4736,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
@@ -505,20 +569,25 @@ index d51fc27..44e14b4 100644
  	}
  	if len(sections) == 0 {
  		return ""
-@@ -8624,7 +8640,11 @@ func formatUsageBlock(lang Language, window *UsageWindow) string {
- 		remaining = 0
- 	}
+@@ -8619,23 +8635,37 @@ func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
+ }
+ 
+ func formatUsageBlock(lang Language, window *UsageWindow) string {
+-	remaining := 100 - window.UsedPercent
+-	if remaining < 0 {
+-		remaining = 0
+-	}
  	var sb strings.Builder
 -	sb.WriteString(usageWindowLabel(lang, window.WindowSeconds))
+-	sb.WriteString("\n")
+-	sb.WriteString(usageRemainingLabel(lang))
+-	sb.WriteString(usageColon(lang))
+-	sb.WriteString(fmt.Sprintf("%d%%", remaining))
 +	sb.WriteString("**")
 +	sb.WriteString(usageWindowDisplayLabel(lang, window))
 +	sb.WriteString("**\n")
 +	sb.WriteString(formatUsageProgressBar(window.UsedPercent))
 +	sb.WriteString(fmt.Sprintf(" %d%%", window.UsedPercent))
- 	sb.WriteString("\n")
- 	sb.WriteString(usageRemainingLabel(lang))
- 	sb.WriteString(usageColon(lang))
-@@ -8632,10 +8652,28 @@ func formatUsageBlock(lang Language, window *UsageWindow) string {
  	sb.WriteString("\n")
  	sb.WriteString(usageResetLabel(lang))
  	sb.WriteString(usageColon(lang))
@@ -548,7 +617,7 @@ index d51fc27..44e14b4 100644
  func (e *Engine) renderUsageCard(report *UsageReport) *Card {
  	lang := e.i18n.CurrentLang()
  	return NewCard().
-@@ -8645,20 +8683,31 @@ func (e *Engine) renderUsageCard(report *UsageReport) *Card {
+@@ -8645,20 +8675,31 @@ func (e *Engine) renderUsageCard(report *UsageReport) *Card {
  		Build()
  }
  
@@ -592,7 +661,7 @@ index d51fc27..44e14b4 100644
  }
  
  func usageAccountLabel(lang Language) string {
-@@ -8676,6 +8725,45 @@ func usageAccountLabel(lang Language) string {
+@@ -8676,6 +8717,45 @@ func usageAccountLabel(lang Language) string {
  	}
  }
  
@@ -638,11 +707,190 @@ index d51fc27..44e14b4 100644
  func usageWindowLabel(lang Language, seconds int) string {
  	switch seconds {
  	case 18000:
+@@ -9467,7 +9547,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
+ 			if current == "" {
+ 				sb.WriteString(e.i18n.T(MsgModelDefault))
+ 			} else {
+-				sb.WriteString(e.i18n.Tf(MsgModelCurrent, current))
++				sb.WriteString(e.i18n.Tf(MsgModelCurrent, displayModelName(current)))
+ 				sb.WriteString("\n")
+ 			}
+ 			sb.WriteString("\n")
+@@ -9479,21 +9559,12 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
+ 				if m.Name == current {
+ 					marker = "> "
+ 				}
+-				var line string
+-				if m.Alias != "" {
+-					line = fmt.Sprintf("%s%d. %s - %s\n", marker, i+1, m.Alias, m.Name)
+-				} else {
+-					desc := m.Desc
+-					if desc != "" {
+-						desc = " — " + desc
+-					}
+-					line = fmt.Sprintf("%s%d. %s%s\n", marker, i+1, m.Name, desc)
+-				}
++				line := fmt.Sprintf("%s%d. %s\n", marker, i+1, displayModelOptionLabel(m))
+ 				sb.WriteString(line)
+ 
+-				label := m.Name
++				label := displayModelName(m.Name)
+ 				if m.Alias != "" {
+-					label = m.Alias
++					label = displayModelName(m.Alias)
+ 				}
+ 				if m.Name == current {
+ 					label = "▶ " + label
+@@ -12778,18 +12849,13 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
+ 	if current == "" {
+ 		sb.WriteString(e.i18n.T(MsgModelDefault))
+ 	} else {
+-		sb.WriteString(e.i18n.Tf(MsgModelCurrent, current))
++		sb.WriteString(e.i18n.Tf(MsgModelCurrent, displayModelName(current)))
+ 	}
+ 
+ 	var opts []CardSelectOption
+ 	initVal := ""
+ 	for i, m := range models {
+-		label := m.Name
+-		if m.Alias != "" {
+-			label = m.Alias + " - " + m.Name
+-		} else if m.Desc != "" {
+-			label += " — " + m.Desc
+-		}
++		label := displayModelOptionLabel(m)
+ 		val := fmt.Sprintf("act:/model switch %d", i+1)
+ 		opts = append(opts, CardSelectOption{Text: label, Value: val})
+ 		if m.Name == current {
+@@ -12805,10 +12871,48 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
+ 	return cb.Build()
+ }
+ 
++func displayModelOptionLabel(m ModelOption) string {
++	label := displayModelName(m.Name)
++	if alias := strings.TrimSpace(m.Alias); alias != "" {
++		aliasLabel := displayModelName(alias)
++		if !strings.EqualFold(aliasLabel, label) {
++			return aliasLabel + " - " + label
++		}
++		return label
++	}
++	if desc := strings.TrimSpace(m.Desc); desc != "" && !strings.EqualFold(desc, label) {
++		return label + " — " + desc
++	}
++	return label
++}
++
++func displayModelName(raw string) string {
++	s := strings.TrimSpace(raw)
++	if s == "" {
++		return ""
++	}
++	key := strings.ToLower(s)
++	key = strings.TrimPrefix(key, "claude-")
++	key = strings.TrimSuffix(key, "-latest")
++	switch key {
++	case "fable", "fable-5":
++		return "Fable 5"
++	case "sonnet", "sonnet-5":
++		return "Sonnet 5"
++	case "opus", "opus-4-8", "opus-4.8":
++		return "Opus 4.8"
++	case "opus[1m]", "opus-4-8[1m]", "opus-4.8[1m]":
++		return "Opus 4.8 (1M)"
++	case "haiku", "haiku-4-5", "haiku-4.5", "haiku-4-5-20251001":
++		return "Haiku 4.5"
++	}
++	return s
++}
++
+ func (e *Engine) renderModelSwitchingCard(target string) *Card {
+ 	return NewCard().
+ 		Title(e.i18n.T(MsgCardTitleModel), "orange").
+-		Markdown(e.i18n.Tf(MsgModelCardSwitching, target)).
++		Markdown(e.i18n.Tf(MsgModelCardSwitching, displayModelName(target))).
+ 		Build()
+ }
+ 
+@@ -12822,7 +12926,7 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
+ 	}
+ 	return NewCard().
+ 		Title(e.i18n.T(MsgCardTitleModel), "green").
+-		Markdown(e.i18n.Tf(MsgModelCardSwitched, target)).
++		Markdown(e.i18n.Tf(MsgModelCardSwitched, displayModelName(target))).
+ 		Buttons(e.modelCardBackButton()).
+ 		Build()
+ }
 diff --git a/core/engine_test.go b/core/engine_test.go
-index b53f3c6..356d6dc 100644
+index b53f3c6..21882ec 100644
 --- a/core/engine_test.go
 +++ b/core/engine_test.go
-@@ -15867,3 +15867,29 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
+@@ -5951,11 +5951,9 @@ func TestCmdUsage_Success(t *testing.T) {
+ 	for _, want := range []string{
+ 		"Account: dev@example.com (team)",
+ 		"5h limit",
+-		"Remaining: 77%",
+ 		"Resets: 1h 51m",
+ 		"5h limit",
+ 		"7d limit",
+-		"Remaining: 58%",
+ 		"Resets: 5d 22h 24m",
+ 	} {
+ 		if !strings.Contains(got, want) {
+@@ -5965,6 +5963,9 @@ func TestCmdUsage_Success(t *testing.T) {
+ 	if strings.Contains(got, "```") {
+ 		t.Fatalf("usage text = %q, should not use code block on plain platform", got)
+ 	}
++	if strings.Contains(got, "Remaining:") {
++		t.Fatalf("usage text = %q, should not include redundant remaining text", got)
++	}
+ }
+ 
+ func TestCmdUsage_UsesCardOnCardPlatform(t *testing.T) {
+@@ -6001,16 +6002,17 @@ func TestCmdUsage_UsesCardOnCardPlatform(t *testing.T) {
+ 	for _, want := range []string{
+ 		"账号：dev@example.com (team)",
+ 		"5小时限额",
+-		"剩余：77%",
+ 		"重置：1小时 51分钟",
+ 		"7日限额",
+-		"剩余：58%",
+ 		"重置：5天 22小时 24分钟",
+ 	} {
+ 		if !strings.Contains(text, want) {
+ 			t.Fatalf("card text = %q, want substring %q", text, want)
+ 		}
+ 	}
++	if strings.Contains(text, "剩余") {
++		t.Fatalf("card text = %q, should not include redundant remaining text", text)
++	}
+ }
+ 
+ func TestCmdUsage_LocalizedChinese(t *testing.T) {
+@@ -6044,10 +6046,8 @@ func TestCmdUsage_LocalizedChinese(t *testing.T) {
+ 	for _, want := range []string{
+ 		"账号：dev@example.com (team)",
+ 		"5小时限额",
+-		"剩余：77%",
+ 		"重置：1小时 51分钟",
+ 		"7日限额",
+-		"剩余：58%",
+ 		"重置：5天 22小时 24分钟",
+ 	} {
+ 		if !strings.Contains(got, want) {
+@@ -6055,7 +6055,10 @@ func TestCmdUsage_LocalizedChinese(t *testing.T) {
+ 		}
+ 	}
+ 	if strings.Contains(got, "```") {
+-		t.Fatalf("usage text = %q, should not use code block on plain platform", got)
++		t.Fatalf("usage text = %q, should not use code block", got)
++	}
++	if strings.Contains(got, "剩余") {
++		t.Fatalf("usage text = %q, should not include redundant remaining text", got)
+ 	}
+ }
+ 
+@@ -15867,3 +15870,68 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
  		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
  	}
  }
@@ -668,8 +916,47 @@ index b53f3c6..356d6dc 100644
 +	if !strings.Contains(got, "7日限额（Fable）") {
 +		t.Fatalf("usage report missing Fable week label: %q", got)
 +	}
-+	if !strings.Contains(got, "剩余：16%") {
-+		t.Fatalf("usage report missing Fable remaining percentage: %q", got)
++	if strings.Contains(got, "剩余") {
++		t.Fatalf("usage report should not include redundant remaining text: %q", got)
++	}
++	if !strings.Contains(got, "█████████████████░░░ 84%") {
++		t.Fatalf("usage report missing Fable progress bar: %q", got)
++	}
++}
++
++func TestDisplayModelName_ClaudeAliasesIncludeVersion(t *testing.T) {
++	cases := map[string]string{
++		"fable":                     "Fable 5",
++		"sonnet":                    "Sonnet 5",
++		"opus":                      "Opus 4.8",
++		"opus[1m]":                  "Opus 4.8 (1M)",
++		"haiku":                     "Haiku 4.5",
++		"claude-haiku-4-5-20251001": "Haiku 4.5",
++		"custom/provider-model":     "custom/provider-model",
++	}
++	for in, want := range cases {
++		if got := displayModelName(in); got != want {
++			t.Fatalf("displayModelName(%q) = %q, want %q", in, got, want)
++		}
++	}
++}
++
++func TestDisplayModelOptionLabel_FormatsClaudeChoices(t *testing.T) {
++	cases := []struct {
++		name string
++		opt  ModelOption
++		want string
++	}{
++		{name: "plain alias", opt: ModelOption{Name: "fable"}, want: "Fable 5"},
++		{name: "full name alias", opt: ModelOption{Name: "claude-sonnet-5"}, want: "Sonnet 5"},
++		{name: "distinct alias", opt: ModelOption{Name: "openai/gpt-4.1", Alias: "gpt"}, want: "gpt - openai/gpt-4.1"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := displayModelOptionLabel(tc.opt); got != tc.want {
++				t.Fatalf("displayModelOptionLabel(%+v) = %q, want %q", tc.opt, got, tc.want)
++			}
++		})
 +	}
 +}
 diff --git a/core/streaming.go b/core/streaming.go
