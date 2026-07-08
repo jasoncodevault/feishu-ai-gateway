@@ -1,8 +1,26 @@
 diff --git a/agent/claudecode/claude_usage.go b/agent/claudecode/claude_usage.go
-index f16bd40..95e0041 100644
+index f16bd40..67de8b4 100644
 --- a/agent/claudecode/claude_usage.go
 +++ b/agent/claudecode/claude_usage.go
-@@ -47,8 +47,9 @@ type claudeUsageProbeState struct {
+@@ -29,11 +29,12 @@ const (
+ )
+ 
+ var (
+-	claudeUsagePercentRe    = regexp.MustCompile(`(?i)\b(\d{1,3})\s*%\s*used\b`)
+-	claudeUsageResetLineRe  = regexp.MustCompile(`(?i)^resets\s+(.+?)\s*$`)
+-	claudeUsageParenTZRe    = regexp.MustCompile(`^(.*?)\s*\(([^()]+)\)\s*$`)
+-	claudeUsageWhitespaceRe = regexp.MustCompile(`[ \t]+`)
+-	claudeUsageRuleLineRe   = regexp.MustCompile(`^[\p{Zs}\-─━_=]{4,}$`)
++	claudeUsagePercentRe     = regexp.MustCompile(`(?i)\b(\d{1,3})\s*%\s*used\b`)
++	claudeUsageResetLineRe   = regexp.MustCompile(`(?i)^resets\s+(.+?)\s*$`)
++	claudeUsageInlineResetRe = regexp.MustCompile(`(?i)\bresets\s+(.+?)\s*$`)
++	claudeUsageParenTZRe     = regexp.MustCompile(`^(.*?)\s*\(([^()]+)\)\s*$`)
++	claudeUsageWhitespaceRe  = regexp.MustCompile(`[ 	]+`)
++	claudeUsageRuleLineRe    = regexp.MustCompile(`^[\p{Zs}\-─━_=]{4,}$`)
+ )
+ 
+ type claudeUsageProbeState struct {
+@@ -47,17 +48,52 @@ type claudeUsageProbeState struct {
  }
  
  func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
@@ -13,8 +31,53 @@ index f16bd40..95e0041 100644
 +		return nil, fmt.Errorf("claudecode: CLI %q not found in PATH", cmdPath)
  	}
  
- 	screen, err := a.runClaudeUsageProbe(ctx)
-@@ -73,7 +74,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
+-	screen, err := a.runClaudeUsageProbe(ctx)
++	screen, err := a.runClaudeUsagePrint(ctx)
+ 	if err != nil {
+-		return nil, err
++		screen, err = a.runClaudeUsageProbe(ctx)
++		if err != nil {
++			return nil, err
++		}
+ 	}
+ 	return parseClaudeUsageReport(screen, time.Now())
+ }
+ 
++func (a *Agent) runClaudeUsagePrint(ctx context.Context) (string, error) {
++	cmdPath, cmdPrefixArgs := a.usageProbeCommand()
++	cmdArgs := append(append([]string{}, cmdPrefixArgs...), "--print", "/usage")
++	cmd := exec.CommandContext(ctx, cmdPath, cmdArgs...)
++	if workDir := a.usageProbeWorkDir(); workDir != "" {
++		cmd.Dir = workDir
++	}
++	env := filterEnv(os.Environ(), "CLAUDECODE")
++	env = append(env, "DISABLE_TELEMETRY=true")
++	env = append(env, "DISABLE_COST_WARNINGS=true")
++	if extra := a.usageProbeEnv(); len(extra) > 0 {
++		env = core.MergeEnv(env, extra)
++	}
++	cmd.Env = env
++	out, err := cmd.CombinedOutput()
++	text := normalizeClaudeUsageText(string(out))
++	if err != nil {
++		if screenErr := detectClaudeUsageOutputError(text, ""); screenErr != nil {
++			return "", screenErr
++		}
++		return "", fmt.Errorf("claudecode: Claude Code /usage print failed: %w", err)
++	}
++	if !usageReady(text) {
++		if screenErr := detectClaudeUsageOutputError(text, ""); screenErr != nil {
++			return "", screenErr
++		}
++		return "", fmt.Errorf("claudecode: Claude Code /usage print did not include a usage panel")
++	}
++	return text, nil
++}
++
+ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
+ 	probeCtx, cancel := context.WithCancel(ctx)
+ 	defer cancel()
+@@ -73,7 +109,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
  		"--permission-mode", "plan",
  		"--no-chrome",
  	}
@@ -25,7 +88,7 @@ index f16bd40..95e0041 100644
  	cmd.Dir = workDir
  
  	env := filterEnv(os.Environ(), "CLAUDECODE")
-@@ -205,6 +208,16 @@ func (a *Agent) usageProbeEnv() []string {
+@@ -205,6 +243,22 @@ func (a *Agent) usageProbeEnv() []string {
  	return a.runtimeEnvLocked()
  }
  
@@ -39,19 +102,120 @@ index f16bd40..95e0041 100644
 +	return cmd, append([]string(nil), a.cliExtraArgs...)
 +}
 +
++func (a *Agent) usageProbeWorkDir() string {
++	a.mu.Lock()
++	defer a.mu.Unlock()
++	return a.workDir
++}
++
  func nextClaudeUsageProbeAction(screen string, state *claudeUsageProbeState, now time.Time) string {
  	if now.Sub(state.lastActionAt) < claudeUsageActionGap {
  		return ""
-@@ -253,6 +266,9 @@ func promptActionForScreen(screen string) string {
+@@ -253,6 +307,12 @@ func promptActionForScreen(screen string) string {
  	if lower == "" {
  		return ""
  	}
-+	if strings.Contains(lower, "choose the text style") || strings.Contains(lower, "syntax theme") || strings.Contains(lower, "dark mode") {
++	compact := strings.ReplaceAll(lower, " ", "")
++	if strings.Contains(lower, "choose the text style") || strings.Contains(compact, "choosethetextstyle") ||
++		strings.Contains(lower, "syntax theme") || strings.Contains(compact, "syntaxtheme") ||
++		strings.Contains(lower, "dark mode") || strings.Contains(compact, "darkmode") {
 +		return "\r"
 +	}
  	if strings.Contains(lower, "quick safety check") || strings.Contains(lower, "yes, i trust this folder") {
  		return "\r"
  	}
+@@ -348,29 +408,35 @@ func parseClaudeUsageWindow(lines []string, header string, windowSeconds int, no
+ 		usedPercent *int
+ 		resetRaw    string
+ 	)
+-	for i := start + 1; i < len(lines); i++ {
+-		line := strings.TrimSpace(lines[i])
+-		if line == "" {
+-			continue
+-		}
+-		lower := strings.ToLower(line)
+-		if i > start+1 && (strings.HasPrefix(lower, "current ") || strings.HasPrefix(lower, "extra usage")) {
+-			break
+-		}
++	parseFields := func(line string) {
+ 		if usedPercent == nil {
+ 			if m := claudeUsagePercentRe.FindStringSubmatch(line); len(m) == 2 {
+ 				v, _ := strconv.Atoi(m[1])
+ 				usedPercent = &v
+-				continue
+ 			}
+ 		}
+ 		if resetRaw == "" {
+ 			if m := claudeUsageResetLineRe.FindStringSubmatch(line); len(m) == 2 {
+ 				resetRaw = strings.TrimSpace(m[1])
++			} else if m := claudeUsageInlineResetRe.FindStringSubmatch(line); len(m) == 2 {
++				resetRaw = strings.TrimSpace(m[1])
+ 			}
+ 		}
+ 	}
+ 
++	parseFields(lines[start])
++	for i := start + 1; i < len(lines); i++ {
++		line := strings.TrimSpace(lines[i])
++		if line == "" {
++			continue
++		}
++		lower := strings.ToLower(line)
++		if i > start+1 && (strings.HasPrefix(lower, "current ") || strings.HasPrefix(lower, "extra usage")) {
++			break
++		}
++		parseFields(line)
++	}
++
+ 	if usedPercent == nil {
+ 		return core.UsageWindow{}, fmt.Errorf("claudecode: missing usage percentage in %s block", header)
+ 	}
+diff --git a/agent/claudecode/claude_usage_test.go b/agent/claudecode/claude_usage_test.go
+index 9d9f518..a4dce3e 100644
+--- a/agent/claudecode/claude_usage_test.go
++++ b/agent/claudecode/claude_usage_test.go
+@@ -29,6 +29,41 @@ func TestSanitizeClaudeUsageOutput_RendersCursorMoves(t *testing.T) {
+ 	}
+ }
+ 
++func TestPromptActionForScreen_AcceptsThemeChooserWithCollapsedSpacing(t *testing.T) {
++	screen := "WelcometoClaudeCodev2.1.204\nChoosethetextstylethatlooksbestwithyourterminal\nSyntaxtheme:MonokaiExtended"
++	if got := promptActionForScreen(screen); got != "\r" {
++		t.Fatalf("promptActionForScreen() = %q, want enter", got)
++	}
++}
++
++func TestParseClaudeUsageReport_PrintFormat(t *testing.T) {
++	loc := mustLoadLocation(t, "UTC")
++	now := time.Date(2026, time.July, 8, 10, 15, 0, 0, loc)
++	text := strings.TrimSpace(`
++You are currently using your subscription to power your Claude Code usage
++
++Current session: 45% used · resets Jul 8, 1:59pm (UTC)
++Current week (all models): 58% used · resets Jul 13, 2:59pm (UTC)
++Current week (Fable): 84% used · resets Jul 13, 2:59pm (UTC)
++`)
++
++	report, err := parseClaudeUsageReport(text, now)
++	if err != nil {
++		t.Fatalf("parseClaudeUsageReport returned error: %v", err)
++	}
++	if len(report.Buckets) != 1 || len(report.Buckets[0].Windows) != 2 {
++		t.Fatalf("unexpected bucket layout: %+v", report.Buckets)
++	}
++	session := report.Buckets[0].Windows[0]
++	if session.UsedPercent != 45 || session.ResetAtUnix == 0 {
++		t.Fatalf("bad session window: %+v", session)
++	}
++	week := report.Buckets[0].Windows[1]
++	if week.UsedPercent != 58 || week.ResetAtUnix == 0 {
++		t.Fatalf("bad week window: %+v", week)
++	}
++}
++
+ func TestParseClaudeUsageReport_Success(t *testing.T) {
+ 	loc := mustLoadLocation(t, "Asia/Seoul")
+ 	now := time.Date(2026, time.December, 22, 12, 0, 0, 0, loc)
 diff --git a/agent/claudecode/claudecode.go b/agent/claudecode/claudecode.go
 index be561f5..05a1354 100644
 --- a/agent/claudecode/claudecode.go
@@ -246,7 +410,7 @@ index e24973a..f58f447 100644
  				evt := core.Event{Type: core.EventText, Content: text}
  				select {
 diff --git a/core/engine.go b/core/engine.go
-index d51fc27..a3976b0 100644
+index d51fc27..5090e65 100644
 --- a/core/engine.go
 +++ b/core/engine.go
 @@ -4736,6 +4736,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
@@ -277,6 +441,15 @@ index d51fc27..a3976b0 100644
  				if e.instantReply.Enabled && streamCard == nil {
  					replyContent := e.instantReply.Content
  					if replyContent == "" {
+@@ -8526,7 +8540,7 @@ func (e *Engine) cmdUsage(p Platform, msg *Message) {
+ 		return
+ 	}
+ 
+-	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
++	fetchCtx, cancel := context.WithTimeout(e.ctx, 45*time.Second)
+ 	defer cancel()
+ 
+ 	report, err := reporter.GetUsage(fetchCtx)
 diff --git a/core/streaming.go b/core/streaming.go
 index 8c4aa1a..7ef5891 100644
 --- a/core/streaming.go
